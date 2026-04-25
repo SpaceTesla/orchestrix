@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Scratch pad
+scratch/*
+!scratch/
+!scratch/.gitkeep
