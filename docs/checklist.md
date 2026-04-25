@@ -1,10 +1,10 @@
 ## PHASE 1 — Synchronous Foundation
 
-- [ ] Job dataclass with all required fields
-- [ ] JobRunner with submit() and run_all()
-- [ ] Status transitions work correctly
-- [ ] Failed handlers mark jobs FAILED with error captured
-- [ ] No global state
+- [x] Job dataclass with all required fields
+- [x] JobRunner with submit() and run_all()
+- [x] Status transitions work correctly
+- [x] Failed handlers mark jobs FAILED with error captured
+- [x] No global state
 
 ## PHASE 2 — Async Execution
 
