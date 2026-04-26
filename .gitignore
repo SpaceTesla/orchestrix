@@ -13,3 +13,6 @@ wheels/
 scratch/*
 !scratch/
 !scratch/.gitkeep
+
+# Environment variables
+.env
