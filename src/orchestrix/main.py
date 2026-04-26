@@ -1,3 +1,7 @@
+# path: main.py
+
+import asyncio
+
 from orchestrix.runner.job_runner import JobRunner
 from orchestrix.handlers.sample_handlers import (
     send_email,
@@ -6,8 +10,8 @@ from orchestrix.handlers.sample_handlers import (
 )
 
 
-def main():
-    runner = JobRunner()
+async def main():
+    runner = JobRunner(debug=True)  # toggle this
 
     # Register handlers
     runner.register_handler("email", send_email)
@@ -17,15 +21,20 @@ def main():
     # Submit jobs
     runner.submit("email", {"to": "test@example.com"})
     runner.submit("report", {"user_id": 123})
+    runner.submit("email", {"to": "ops@example.com"})
+    runner.submit("report", {"user_id": 456})
     runner.submit("fail", {})
     runner.submit("email", {"to": "another@example.com"})
-    runner.submit("unknown", {})  # to test missing handler
+    runner.submit("report", {"user_id": 789})
+    runner.submit("email", {"to": "alerts@example.com"})
+    runner.submit("email", {"to": "billing@example.com"})
+    runner.submit("report", {"user_id": 999})
+    runner.submit("unknown", {})  # missing handler test
 
     # Run jobs
-    runner.run_all()
+    await runner.run_all(max_concurrency=3)
 
     # Print results
-
     jobs = list(runner.list_jobs())
 
     try:
@@ -34,6 +43,7 @@ def main():
 
         console = Console()
         table = Table(title="Final Job States", header_style="bold")
+
         table.add_column("id", style="dim", no_wrap=True)
         table.add_column("type", style="cyan")
         table.add_column("status", style="bold")
@@ -49,6 +59,7 @@ def main():
         for job in jobs:
             status = job.status.value
             style = status_style.get(status, "white")
+
             table.add_row(
                 str(job.id),
                 job.type,
@@ -60,11 +71,10 @@ def main():
 
     except Exception:
         print("\n--- Final Job States ---")
-
-        print(" id | type | status | error")
+        print("id | type | status | error")
         for job in jobs:
             print(f"{job.id} | {job.type} | {job.status.value} | {job.error_message}")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

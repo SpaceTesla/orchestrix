@@ -8,11 +8,11 @@
 
 ## PHASE 2 — Async Execution
 
-- [ ] All handlers are async def
-- [ ] asyncio.TaskGroup used for concurrent execution
-- [ ] Semaphore limits concurrent jobs
-- [ ] asyncio.timeout() kills slow handlers
-- [ ] No blocking calls in async context
+- [x] All handlers are async def
+- [x] asyncio.TaskGroup used for concurrent execution
+- [x] Semaphore limits concurrent jobs
+- [x] asyncio.timeout() kills slow handlers
+- [x] No blocking calls in async context
 
 ## PHASE 3 — Postgres Persistence
 
