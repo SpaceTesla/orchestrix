@@ -16,12 +16,12 @@
 
 ## PHASE 3 — Postgres Persistence
 
-- [ ] jobs and job_events tables created
-- [ ] asyncpg connection pool initialized
-- [ ] Optimistic lock on status transitions
-- [ ] Every transition writes to job_events
-- [ ] TIMESTAMPTZ everywhere
-- [ ] Indexes created and verified with EXPLAIN ANALYZE
+- [x] jobs and job_events tables created
+- [x] asyncpg connection pool initialized
+- [x] Optimistic lock on status transitions
+- [x] Every transition writes to job_events
+- [x] TIMESTAMPTZ everywhere
+- [x] Indexes created and verified with EXPLAIN ANALYZE
 
 ## PHASE 4 — Redis Queue
 

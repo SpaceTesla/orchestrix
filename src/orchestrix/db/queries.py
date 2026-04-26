@@ -1,5 +1,6 @@
 from asyncpg import Connection, Record
 from typing import Optional
+import json
 
 
 async def transition_status(
@@ -48,14 +49,14 @@ async def transition_status(
                 worker_id,
                 metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
         """,
             job_id,
             "status_transition",
             old_status,
             new_status,
             worker_id,
-            {"error": error_message} if error_message else {},
+            json.dumps({"error": error_message} if error_message else {}),
         )
 
         return True
