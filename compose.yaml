@@ -24,8 +24,43 @@ services:
     networks:
       - app-network
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+    ports:
+      - "${REDIS_PORT}:6379"
+
+    command: ["redis-server", "--appendonly", "yes"]
+
+    volumes:
+      - redis_data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+    networks:
+      - app-network
+
+  redis-insight:
+    image: redis/redisinsight:latest
+    restart: unless-stopped
+
+    ports:
+      - "8005:5540"
+
+    depends_on:
+      - redis
+
+    networks:
+      - app-network
+
 volumes:
   postgres_data:
+  redis_data:
 
 networks:
   app-network:

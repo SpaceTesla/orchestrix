@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     postgres_password: str
     postgres_db: str
     database_url: str
+    redis_host: str
+    redis_port: str
 
     model_config = SettingsConfigDict(
         env_file=".env",

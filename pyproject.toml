@@ -8,5 +8,6 @@ dependencies = [
     "annotated-types>=0.7.0",
     "asyncpg>=0.31.0",
     "pydantic-settings>=2.14.0",
+    "redis[hiredis]>=7.4.0",
     "rich>=15.0.0",
 ]
