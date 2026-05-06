@@ -29,20 +29,10 @@ See [`docs/roadmap.md`](docs/roadmap.md) for the full phase-by-phase specificati
 
 ## Current Phase
 
-**Phase 1 — Synchronous Foundation**
+**Phase 4 — Redis Queue (decouple submission from execution)**
 
-In-memory job runner. No database, no queue, no async. Just a clean state machine loop.
-
-What exists right now:
-- `Job` dataclass with status transitions
-- `JobRunner` with `submit()`, `run_next()`, `run_all()`
-- A small set of fake job handlers
-
-What is intentionally NOT here yet:
-- No HTTP API
-- No database
-- No Redis
-- No concurrency
+FastAPI accepts job submissions, persists jobs to Postgres, and enqueues `job_id` into a Redis Stream.
+A separate worker process consumes the stream and updates job status in Postgres.
 
 ---
 
@@ -54,13 +44,28 @@ What is intentionally NOT here yet:
 # Clone and set up
 git clone <repo-url>
 cd orchestrix
+cp .env.example .env
 uv sync
 
-# Run Phase 1
-uv run python main.py
+# Ensure Postgres + Redis are running (example via Docker)
+docker run --name orchestrix-postgres -e POSTGRES_PASSWORD=change-me -e POSTGRES_USER=orchestrix -e POSTGRES_DB=orchestrix -p 5432:5432 -d postgres:16
+docker run --name orchestrix-redis -p 6379:6379 -d redis:7
+
+# Bootstrap DB schema (Phase 3+)
+uv run python scripts/bootstrap_db.py
+
+# Run API (Phase 4)
+uv run orchestrix api --reload
+
+# In another terminal: run worker (Phase 4)
+uv run orchestrix worker
 ```
 
-No Docker needed until Phase 3.
+Example request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/jobs -H "Content-Type: application/json" -d "{\"job_type\":\"test\",\"payload\":{\"hello\":\"world\"}}"
+```
 
 ---
 
@@ -68,25 +73,15 @@ No Docker needed until Phase 3.
 
 ```
 orchestrix/
-  main.py              # Current entrypoint
-  docs/
-    roadmap.md         # The master spec — your source of truth
-    architecture.md    # System design, current state + future
-    dev-notes.md       # Running log of discoveries and pitfalls
-    decisions/
-      0001-phase-guardrails.md   # Why we don't skip phases
-  pyproject.toml
-```
-
-Structure will evolve to match the Phase 4 layout:
-
-```
-job_engine/
-  api/         # FastAPI app (Phase 4+)
-  worker/      # Worker process (Phase 4+)
-  db/          # asyncpg pool and queries (Phase 3+)
-  queue/       # Redis client (Phase 4+)
-  models.py
+  src/orchestrix/
+    api/               # FastAPI app (Phase 4+)
+    worker/            # Worker process (Phase 4+)
+    db/                # asyncpg pool + queries (Phase 3+)
+    queue/             # Redis Streams client (Phase 4+)
+    main.py            # CLI entrypoint (api/worker)
+  scripts/             # DB bootstrap and helpers
+  docs/                # Roadmap + notes
+  pyproject.toml       # Dependencies + console script
 ```
 
 ---
@@ -109,7 +104,7 @@ Key choices at the Phase 6+ level:
 
 ## Known Limitations
 
-- Phase 1–2: all state is lost on process restart (intentional)
+- Phase 4: if Postgres write succeeds but Redis `XADD` fails, the job will remain `pending` in Postgres but never be executed (fixed in Phase 7)
 - Phase 3–5: single-region only, no HA Postgres
 - No authentication until Phase 10 stretch goal
 - No Kubernetes / cloud deployment — local Docker Compose only

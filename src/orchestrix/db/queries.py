@@ -62,15 +62,60 @@ async def transition_status(
         return True
 
 
-async def fetch_next_job(conn) -> Optional[Record]:
-    """Pick the pending job scheduled first"""
+async def create_job(
+    conn: Connection,
+    job_type: str,
+    payload: dict,
+) -> Record:
+    return await conn.fetchrow(
+        """
+        INSERT INTO jobs (job_type, payload)
+        VALUES ($1, $2::jsonb)
+        RETURNING id, status
+        """,
+        job_type,
+        json.dumps(payload),
+    )
+
+
+async def get_job(
+    conn: Connection,
+    job_id: str,
+) -> Optional[Record]:
     return await conn.fetchrow(
         """
         SELECT *
         FROM jobs
-        WHERE status = 'pending'
-          AND scheduled_at <= NOW()
-        ORDER BY scheduled_at ASC
-        LIMIT 1
-    """
+        WHERE id = $1
+        """,
+        job_id,
+    )
+
+
+async def list_jobs(
+    conn,
+    limit: int = 20,
+    status: str | None = None,
+):
+    if status:
+        return await conn.fetch(
+            """
+            SELECT id, job_type, status, created_at
+            FROM jobs
+            WHERE status = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            status,
+            limit,
+        )
+
+    return await conn.fetch(
+        """
+        SELECT id, job_type, status, created_at
+        FROM jobs
+        ORDER BY created_at DESC
+        LIMIT $1
+        """,
+        limit,
     )

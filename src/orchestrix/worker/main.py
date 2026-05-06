@@ -1,116 +1,144 @@
-# path: src/orchestrix/worker/main.py
-
 import asyncio
 import socket
 import os
-import signal
 
-from orchestrix.db.pool import create_pool
-from orchestrix.db.queries import fetch_next_job, transition_status
-
-
-WORKER_ID = f"{socket.gethostname()}-{os.getpid()}"
+from orchestrix.queue.redis_client import RedisQueue
+from orchestrix.db.pool import init_pool, get_pool
+from orchestrix.db import queries
+from orchestrix.config import settings
 
 
-async def handle_job(job):
-    print(f"[START] Job {job['id']} | type={job['job_type']}")
-
-    await asyncio.sleep(1)  # simulate work
-
-    if job["job_type"] == "fail":
-        raise Exception("Simulated failure")
-
-    print(f"[DONE] Job {job['id']}")
+def get_worker_id() -> str:
+    return f"{socket.gethostname()}-{os.getpid()}"
 
 
-async def worker_loop():
-    pool = await create_pool()
-    print(f"[WORKER STARTED] id={WORKER_ID}")
+async def _process_message(
+    *,
+    queue: RedisQueue,
+    pool,
+    worker_id: str,
+    message_id: str,
+    data: dict,
+) -> None:
+    job_id = data["job_id"]
 
-    shutdown_event = asyncio.Event()
-    idle_count = 0
+    print(f"[{worker_id}] Received {job_id}")
 
-    # --- graceful shutdown ---
-    def handle_shutdown():
-        print("[SHUTDOWN SIGNAL RECEIVED]")
-        shutdown_event.set()
+    async with pool.acquire() as conn:
+        # Step 1 — claim job (critical)
+        claimed = await queries.transition_status(
+            conn,
+            job_id=job_id,
+            old_status="pending",
+            new_status="running",
+            worker_id=worker_id,
+        )
 
-    loop = asyncio.get_running_loop()
-    try:
-        loop.add_signal_handler(signal.SIGINT, handle_shutdown)
-        loop.add_signal_handler(signal.SIGTERM, handle_shutdown)
-    except NotImplementedError:
-        # Windows fallback (signals behave differently)
-        pass
+        if not claimed:
+            print(f"[{worker_id}] Lost race for {job_id}")
+            await queue.ack(message_id)
+            return
 
-    try:
-        while not shutdown_event.is_set():
-            # 1. Fetch job
-            async with pool.acquire() as conn:
-                job = await fetch_next_job(conn)
+        try:
+            job = await queries.get_job(conn, job_id)
 
-            if not job:
-                idle_count += 1
-                if idle_count % 5 == 0:
-                    print("[IDLE] waiting for jobs...")
-                try:
-                    # wake early if shutdown signal arrives
-                    await asyncio.wait_for(shutdown_event.wait(), timeout=1)
-                except asyncio.TimeoutError:
-                    pass
-                continue
+            # TEMP handler
+            print(f"[{worker_id}] Executing {job['id']}")
+            await asyncio.sleep(1)
+            await queries.transition_status(
+                conn,
+                job_id=job_id,
+                old_status="running",
+                new_status="success",
+                worker_id=worker_id,
+            )
 
-            idle_count = 0
-            job_id = str(job["id"])
+            await queue.ack(message_id)
 
-            # 2. Try to claim job
-            async with pool.acquire() as conn:
-                claimed = await transition_status(
-                    conn,
-                    job_id=job_id,
-                    old_status="pending",
-                    new_status="running",
-                    worker_id=WORKER_ID,
-                )
+            print(f"[{worker_id}] Completed {job['id']}")
+        except Exception as e:
+            print(f"[{worker_id}] Failed {job['id']}: {e}")
 
-            if not claimed:
-                print(f"[RACE LOST] Job {job_id}")
-                await asyncio.sleep(0.1)  # prevent busy spin
-                continue
+            await queries.transition_status(
+                conn,
+                job_id=job_id,
+                old_status="running",
+                new_status="failed",
+                worker_id=worker_id,
+                error_message=str(e),
+            )
 
-            print(f"[CLAIMED] Job {job_id}")
+            # Still ACK so it doesn't loop forever
+            await queue.ack(message_id)
 
-            # 3. Execute WITHOUT holding DB connection
-            try:
-                await handle_job(job)
 
-                async with pool.acquire() as conn:
-                    await transition_status(
-                        conn,
-                        job_id=job_id,
-                        old_status="running",
-                        new_status="success",
-                        worker_id=WORKER_ID,
-                    )
+async def _drain_autoclaim(
+    *,
+    queue: RedisQueue,
+    pool,
+    worker_id: str,
+    min_idle_time_ms: int,
+    count: int,
+) -> int:
+    reclaimed = await queue.autoclaim(
+        consumer_name=worker_id,
+        min_idle_time=min_idle_time_ms,
+        count=count,
+    )
 
-                print(f"[SUCCESS] Job {job_id}")
+    if not reclaimed:
+        return 0
 
-            except Exception as e:
-                print(f"[FAILED] Job {job_id} | error={e}")
+    for message_id, data in reclaimed:
+        await _process_message(
+            queue=queue,
+            pool=pool,
+            worker_id=worker_id,
+            message_id=message_id,
+            data=data,
+        )
 
-                async with pool.acquire() as conn:
-                    await transition_status(
-                        conn,
-                        job_id=job_id,
-                        old_status="running",
-                        new_status="failed",
-                        worker_id=WORKER_ID,
-                        error_message=str(e),
-                    )
+    return len(reclaimed)
 
-    except asyncio.CancelledError:
-        print("[CANCELLED] Worker shutting down cleanly")
 
-    finally:
-        print("[SHUTDOWN] Closing DB pool")
-        await pool.close()
+async def worker():
+    await init_pool()
+
+    queue = RedisQueue(settings.redis_url)
+    await queue.create_group()
+
+    worker_id = get_worker_id()
+
+    print(f"[{worker_id}] Worker started")
+
+    pool = get_pool()
+
+    while True:
+        messages = await queue.read(worker_id, count=5)
+
+        if not messages:
+            # Phase 4 success criteria: on restart, reclaim PEL entries via XAUTOCLAIM.
+            # We also do this during idle periods to recover stuck messages.
+            reclaimed = await _drain_autoclaim(
+                queue=queue,
+                pool=pool,
+                worker_id=worker_id,
+                min_idle_time_ms=30_000,
+                count=10,
+            )
+            if reclaimed:
+                print(f"[{worker_id}] Reclaimed {reclaimed} pending messages")
+            continue
+
+        for message_id, data in messages:
+            await _process_message(
+                queue=queue,
+                pool=pool,
+                worker_id=worker_id,
+                message_id=message_id,
+                data=data,
+            )
+
+
+if __name__ == "__main__":
+    asyncio.run(worker())

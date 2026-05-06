@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     database_url: str
     redis_host: str
     redis_port: str
+    redis_url: str
 
     model_config = SettingsConfigDict(
         env_file=".env",

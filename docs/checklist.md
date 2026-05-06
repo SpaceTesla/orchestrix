@@ -25,11 +25,11 @@
 
 ## PHASE 4 — Redis Queue
 
-- [ ] FastAPI submission endpoint
-- [ ] Redis Streams with consumer groups
-- [ ] Worker is a separate process
-- [ ] XAUTOCLAIM handles dead consumer recovery
-- [ ] Job payload in Postgres, only job_id in stream
+- [x] FastAPI submission endpoint
+- [x] Redis Streams with consumer groups
+- [x] Worker is a separate process
+- [x] XAUTOCLAIM handles dead consumer recovery
+- [x] Job payload in Postgres, only job_id in stream
 
 ## PHASE 5 — Multiple Workers
 

@@ -4,32 +4,44 @@
 
 ---
 
-## Current State — Phase 1 (Synchronous, In-Memory)
+## Current State — Phase 4 (Postgres + Redis Streams)
 
 ```
-┌─────────────────────────────────┐
-│           JobRunner             │
-│                                 │
-│  jobs: list[Job]  (in-memory)   │
-│                                 │
-│  submit(job_type, payload)      │
-│      └─► append Job(PENDING)    │
-│                                 │
-│  run_next()                     │
-│      └─► pick first PENDING     │
-│          run handler            │
-│          update status          │
-│                                 │
-│  run_all()                      │
-│      └─► loop until no PENDING  │
-└─────────────────────────────────┘
+                   ┌─────────────────────┐
+                   │   Client / curl     │
+                   └──────────┬──────────┘
+                              │ POST /jobs
+                              ▼
+                   ┌─────────────────────┐
+                   │    FastAPI (API)    │
+                   │ POST /jobs          │
+                   │ GET /jobs/{id}      │
+                   └────┬───────────┬────┘
+                        │           │
+               write job│           │push job_id
+               (PENDING)│           │XADD
+                        ▼           ▼
+               ┌──────────────┐  ┌──────────────┐
+               │   Postgres   │  │    Redis      │
+               │  jobs table  │  │  Streams      │
+               │  job_events  │  │  jobs:queue   │
+               └──────────────┘  └──────┬────────┘
+                        ▲               │ XREADGROUP
+                        │               │ + XAUTOCLAIM
+                        │               ▼
+                        │   ┌───────────────────────┐
+                        └───┤        Worker         │
+                            │  1) claim in Postgres │
+                            │  2) execute handler   │
+                            │  3) XACK message      │
+                            └───────────────────────┘
 ```
 
-**What doesn't exist yet (intentionally):**
-- No persistence — all state dies with the process
-- No HTTP API
-- No concurrency
-- No external dependencies
+**What still does not exist yet (intentionally):**
+- No multi-worker scale testing (Phase 5)
+- No rate limiting (Phase 6)
+- No retries / reaper (Phase 7)
+- No observability stack (Phase 8)
 
 ---
 

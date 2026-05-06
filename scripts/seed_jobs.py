@@ -4,14 +4,14 @@ import asyncio
 import json
 import random
 
-from orchestrix.db.pool import create_pool
+from orchestrix.db.pool import close_pool, init_pool
 
 
 JOB_TYPES = ["test", "email", "report", "fail"]
 
 
 async def main():
-    pool = await create_pool()
+    pool = await init_pool()
 
     try:
         async with pool.acquire() as conn:
@@ -30,7 +30,7 @@ async def main():
         print("Inserted 10 jobs ✅")
 
     finally:
-        await pool.close()
+        await close_pool()
 
 
 if __name__ == "__main__":
