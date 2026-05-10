@@ -7,7 +7,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     api = sub.add_parser("api", help="Run the FastAPI server")
-    api.add_argument("--host", default="127.0.0.1")
+    api.add_argument("--host", default="0.0.0.0")
     api.add_argument("--port", type=int, default=8000)
     api.add_argument("--reload", action="store_true", default=False)
     api.add_argument("--log-level", default="info")
