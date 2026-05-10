@@ -1,15 +1,72 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from typing import List
 from fastapi import Query
 import asyncpg
 
 from orchestrix.api.deps import get_redis_queue, get_db_conn
-from orchestrix.queue.redis_client import RedisQueue
-from orchestrix.api.schemas import JobCreateRequest, JobResponse
+from orchestrix.queue.redis_client import RedisQueue, get_redis_queue_instance
+from orchestrix.api.schemas import (
+    JobCreateRequest,
+    JobResponse,
+    HealthResponse,
+    DependencyCheck,
+    RootResponse,
+)
 from orchestrix.db import queries
+from orchestrix.db.pool import get_pool
 
 
 router = APIRouter()
+
+
+@router.get("/", response_model=RootResponse)
+async def root(request: Request) -> RootResponse:
+    base = str(request.base_url).rstrip("/")
+    return RootResponse(
+        service=request.app.title,
+        version=request.app.version,
+        docs=f"{base}/docs",
+        openapi=f"{base}/openapi.json",
+        health=f"{base}/health",
+    )
+
+
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    responses={
+        503: {
+            "model": HealthResponse,
+            "description": "PostgreSQL or Redis check failed",
+        }
+    },
+)
+async def get_health():
+    postgres_check = DependencyCheck(ok=True)
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+    except Exception as e:
+        postgres_check = DependencyCheck(ok=False, error=str(e))
+
+    redis_check = DependencyCheck(ok=True)
+    try:
+        queue = get_redis_queue_instance()
+        await queue.redis.ping()
+    except Exception as e:
+        redis_check = DependencyCheck(ok=False, error=str(e))
+
+    healthy = postgres_check.ok and redis_check.ok
+    body = HealthResponse(
+        status="healthy" if healthy else "unhealthy",
+        postgres=postgres_check,
+        redis=redis_check,
+    )
+    if not healthy:
+        return JSONResponse(status_code=503, content=body.model_dump())
+    return body
 
 
 @router.post("/jobs", response_model=JobResponse)
