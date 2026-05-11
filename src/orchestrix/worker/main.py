@@ -44,7 +44,7 @@ async def _process_message(
 
             # TEMP handler
             print(f"[{worker_id}] Executing {job['id']}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(10)
             await queries.transition_status(
                 conn,
                 job_id=job_id,
