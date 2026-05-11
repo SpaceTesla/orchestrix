@@ -1,8 +1,11 @@
+from uuid import UUID
+
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Literal
 
 
 class JobCreateRequest(BaseModel):
+    tenant_id: UUID
     job_type: str
     payload: Dict[str, Any] = Field(default_factory=dict)
 

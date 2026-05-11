@@ -11,6 +11,7 @@ class JobStatus(Enum):
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
+    DEAD = "dead"
 
 
 Timeout = Annotated[int, Ge(0)]

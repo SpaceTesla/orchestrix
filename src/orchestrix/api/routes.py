@@ -77,7 +77,10 @@ async def create_jobs(
 ):
     # Step 1 - insert into db
     job = await queries.create_job(
-        conn, job_type=request.job_type, payload=request.payload
+        conn,
+        tenant_id=str(request.tenant_id),
+        job_type=request.job_type,
+        payload=request.payload,
     )
 
     # Step 2 - enqueue (insert to redis stream)

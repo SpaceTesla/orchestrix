@@ -15,22 +15,26 @@ async def transition_status(
         result = await conn.fetchrow(
             """
             UPDATE jobs
-            SET status = $3,
+            SET status = $3::job_status,
                 worker_id = $4,
                 attempt_count = CASE
-                    WHEN $3 = 'running' THEN attempt_count + 1
+                    WHEN $3::job_status = 'running'::job_status THEN attempt_count + 1
                     ELSE attempt_count
                 END,
-                started_at = CASE 
-                    WHEN $3 = 'running' THEN NOW() 
-                    ELSE started_at 
+                started_at = CASE
+                    WHEN $3::job_status = 'running'::job_status THEN NOW()
+                    ELSE started_at
                 END,
-                completed_at = CASE 
-                    WHEN $3 IN ('success', 'failed', 'dead') THEN NOW()
+                completed_at = CASE
+                    WHEN $3::job_status IN (
+                        'success'::job_status,
+                        'failed'::job_status,
+                        'dead'::job_status
+                    ) THEN NOW()
                     ELSE completed_at
                 END,
                 error_message = $5
-            WHERE id = $1 AND status = $2
+            WHERE id = $1 AND status = $2::job_status
             RETURNING id;
         """,
             job_id,
@@ -68,15 +72,17 @@ async def transition_status(
 
 async def create_job(
     conn: Connection,
+    tenant_id: str,
     job_type: str,
     payload: dict,
 ) -> Record:
     return await conn.fetchrow(
         """
-        INSERT INTO jobs (job_type, payload)
-        VALUES ($1, $2::jsonb)
+        INSERT INTO jobs (tenant_id, job_type, payload)
+        VALUES ($1, $2, $3::jsonb)
         RETURNING id, status
         """,
+        tenant_id,
         job_type,
         json.dumps(payload),
     )
