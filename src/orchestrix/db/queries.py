@@ -17,6 +17,10 @@ async def transition_status(
             UPDATE jobs
             SET status = $3,
                 worker_id = $4,
+                attempt_count = CASE
+                    WHEN $3 = 'running' THEN attempt_count + 1
+                    ELSE attempt_count
+                END,
                 started_at = CASE 
                     WHEN $3 = 'running' THEN NOW() 
                     ELSE started_at 
