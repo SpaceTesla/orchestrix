@@ -33,18 +33,18 @@
 
 ## PHASE 5 — Multiple Workers
 
-- [ ] 3 workers run simultaneously without duplicates
-- [ ] Each worker has a unique worker_id
-- [ ] Optimistic lock verified under concurrent workers
-- [ ] Worker pause + XAUTOCLAIM recovery tested
+- [x] 3 workers run simultaneously without duplicates
+- [x] Each worker has a unique worker_id
+- [x] Optimistic lock verified under concurrent workers
+- [x] Worker pause + XAUTOCLAIM recovery tested
 
 ## PHASE 6 — Rate Limiting
 
-- [ ] Token bucket Lua script written and tested
-- [ ] Script registered, not EVAL'd inline
-- [ ] Tenant config cached with TTL
-- [ ] Backoff with jitter when rate-limited
-- [ ] Rate limit verified at correct RPS
+- [x] Token bucket Lua script written and tested
+- [x] Script registered, not EVAL'd inline
+- [x] Tenant config cached with TTL
+- [x] Backoff with jitter when rate-limited
+- [x] Rate limit verified at correct RPS
 
 ## PHASE 7 — Multi-Tenancy and Failures
 

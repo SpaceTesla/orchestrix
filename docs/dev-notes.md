@@ -416,11 +416,57 @@ Two workers call the token bucket Lua script simultaneously for the same tenant.
 
 ---
 
-### [Phase 6] Placeholder
+### [Phase 6] Redis serializes scripts; "simultaneous" becomes a strict queue
 
-Date: YYYY-MM-DD
+Date: 2026-05-14
 
-TODO
+The pre-phase question is a good sanity check.
+
+Two clients can issue `EVALSHA` at the same wall-clock instant on the network, but Redis executes commands one at a time per shard. Each script run is atomic: refill from elapsed time, compare to `tokens_requested`, update hash fields, set key TTL, return `{allowed, remaining, retry_after}` with no interleaving from other commands.
+
+So there is no undefined interleaving order inside the bucket for a single key; the meaningful "order" is whatever order Redis accepted the connections' bytes.
+
+---
+
+### [Phase 6] `register_script` is the real "no inline EVAL" win
+
+Date: 2026-05-14
+
+`RedisRateLimiter` loads `token_bucket.lua` once at construction and calls `redis.register_script`. After that, the client sends the script body to Redis only until the server has cached the SHA; later calls use `EVALSHA` semantics instead of shipping the full Lua on every request.
+
+That matches the checklist intent: register once, execute many times, not giant `EVAL` payloads per allow check.
+
+---
+
+### [Phase 6] Token bucket state is a tiny hash, not a queue
+
+Date: 2026-05-14
+
+The Lua script stores `tokens` and `last_refill` in a Redis hash keyed by tenant (`rate_limit:{tenant_id}`). Refill is continuous: `elapsed * refill_rate`, capped at `max_tokens`, then debit if allowed.
+
+On deny, it still advances `last_refill` to `current_time` (passed from Python as `time.time()`), which matches classic token-bucket semantics and yields a deterministic `retry_after` hint when `refill_rate > 0`. When `refill_rate == 0`, the script returns `retry_after = -1` so callers know there is no time-based refill.
+
+The bucket key also gets a one-hour `EXPIRE` so idle tenants do not accumulate state forever.
+
+---
+
+### [Phase 6] Tenant limits live in Postgres; Redis is a short TTL mirror
+
+Date: 2026-05-14
+
+`TenantConfigCache` reads `tenant_config:{tenant_id}` as a Redis hash. On miss it loads `rate_limit_rps` and `burst_capacity` from `tenants`, writes the hash back, and sets `EXPIRE` to 60 seconds (`CACHE_TTL_SECONDS`).
+
+So rate limit parameters are authoritative in Postgres, but hot paths avoid hitting the DB on every job once the tenant is warm.
+
+---
+
+### [Phase 6] Jitter belongs in application code, not in Lua
+
+Date: 2026-05-14
+
+`sleep_retry_after_with_jitter` adds a small uniform jitter on top of `retry_after` (and a fixed floor when `retry_after < 0`) so many workers do not wake up in lockstep and hammer Redis.
+
+The Lua stays deterministic, which keeps the script easy to reason about and test; `scripts/test_lua.py` exercises concurrent `allow()` calls, and `scripts/test_rate_limit_backoff.py` spins many async workers to confirm bounded retries without busy-spin.
 
 ---
 
@@ -478,6 +524,8 @@ _(Add here as you go — this is the most valuable section)_
 | 4     | queues guarantee uniqueness                           | Redis Streams guarantee at-least-once delivery                 | correctness must exist outside the queue                      |
 | 5     | Redis consumer groups prevent all races               | reclaim/re-delivery still creates duplicate delivery scenarios | DB optimistic locking is the real correctness layer           |
 | 5     | preventing duplicate execution means system is solved | jobs can still become orphaned forever                         | safety and liveness are separate distributed systems concerns |
+| 6     | rate-limit randomness should live in Redis            | Lua returns a deterministic `retry_after`; Python adds jitter | keep scripts testable; spread wakeups in the client               |
+| 6     | every allow check should hit Postgres for limits      | tenant config is cached in Redis with TTL on miss              | separate source of truth (DB) from read path amplification       |
 
 ---
 
@@ -495,3 +543,5 @@ _(If you looked something up twice, write a one-line summary here so you don't l
 | TIMESTAMPTZ                | Timezone-aware timestamps required for distributed systems correctness               |
 | Structured concurrency     | Tasks should have explicit ownership/lifecycle relationships                         |
 | Safety vs liveness         | Preventing corruption is separate from guaranteeing eventual completion              |
+| `register_script` (redis-py) | Load Lua once; server caches SHA; hot path uses `EVALSHA`-style execution, not full `EVAL` each time |
+| Token bucket in Redis      | Hash holds tokens + last refill; script refills by elapsed time, caps burst, debits atomically per call |
