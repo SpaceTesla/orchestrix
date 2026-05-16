@@ -1,6 +1,6 @@
 # path: orchestrix/runner/job_runner.py
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Callable, Dict, Any, Optional, Awaitable, Annotated
 from annotated_types import Ge
 from uuid import UUID
@@ -8,7 +8,9 @@ from uuid import UUID
 import asyncio
 from rich.console import Console
 
+from orchestrix.config import settings
 from orchestrix.models.job import Job, JobStatus, Timeout
+from orchestrix.retry.backoff import compute_retry_delay_seconds, should_retry
 
 MaxConcurrency = Annotated[int, Ge(1)]
 DEFAULT_TIMEOUT = 10
@@ -42,9 +44,49 @@ class JobRunner:
         self.jobs.append(job)
         return job
 
+    def _is_eligible(self, job: Job) -> bool:
+        now = datetime.now(timezone.utc)
+        scheduled_at = job.scheduled_at
+        if scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+        return scheduled_at <= now
+
+    def _handle_failure(self, job: Job, error_message: str) -> None:
+        if should_retry(job.attempt_count, job.max_attempts):
+            delay_seconds = compute_retry_delay_seconds(
+                job.attempt_count,
+                base_delay=settings.retry_base_delay_seconds,
+                max_delay=settings.retry_max_delay_seconds,
+            )
+            job.status = JobStatus.PENDING
+            job.scheduled_at = datetime.now(timezone.utc) + timedelta(
+                seconds=delay_seconds
+            )
+            job.error_message = error_message
+            job.started_at = None
+            job.completed_at = None
+            self._log(
+                f"[{job.type}] retry_scheduled | id={job.id} tenant_id={job.tenant_id} "
+                f"| attempt={job.attempt_count}/{job.max_attempts} "
+                f"| delay_seconds={delay_seconds:.2f}",
+                style="yellow",
+            )
+            return
+
+        job.status = JobStatus.DEAD
+        job.error_message = error_message
+        job.completed_at = datetime.now(timezone.utc)
+        self._log(
+            f"[{job.type}] job_dead | id={job.id} tenant_id={job.tenant_id} "
+            f"| attempt={job.attempt_count}/{job.max_attempts} | error={error_message}",
+            style="bold red",
+        )
+
     async def _run_job(self, job: Job) -> Job:
-        # Prevent re-running non-pending jobs
         if job.status != JobStatus.PENDING:
+            return job
+
+        if not self._is_eligible(job):
             return job
 
         job.status = JobStatus.RUNNING
@@ -53,10 +95,8 @@ class JobRunner:
         handler = self.handlers.get(job.type)
 
         if not handler:
-            job.status = JobStatus.FAILED
-            job.error_message = f"No handler for job type: {job.type}"
-            job.completed_at = datetime.now(timezone.utc)
-
+            job.attempt_count += 1
+            self._handle_failure(job, f"No handler for job type: {job.type}")
             self._log(
                 f"[{job.type}] NO HANDLER | id={job.id} tenant_id={job.tenant_id}",
                 style="bold red",
@@ -89,8 +129,7 @@ class JobRunner:
             )
 
         except asyncio.TimeoutError:
-            job.status = JobStatus.FAILED
-            job.error_message = f"timeout after {timeout}s"
+            self._handle_failure(job, f"timeout after {timeout}s")
             self._log(
                 f"[{job.type}] TIMEOUT | id={job.id} tenant_id={job.tenant_id} "
                 f"| timeout={timeout}s",
@@ -98,15 +137,15 @@ class JobRunner:
             )
 
         except Exception as e:
-            job.status = JobStatus.FAILED
-            job.error_message = str(e)
+            self._handle_failure(job, str(e))
             self._log(
                 f"[{job.type}] FAILED | id={job.id} tenant_id={job.tenant_id} | error={e}",
                 style="red",
             )
 
         finally:
-            job.completed_at = datetime.now(timezone.utc)
+            if job.status == JobStatus.SUCCESS:
+                job.completed_at = datetime.now(timezone.utc)
             self.active_jobs = max(0, self.active_jobs - 1)
             self._log(
                 f"[{job.type}] DONE | id={job.id} tenant_id={job.tenant_id} "
@@ -121,7 +160,10 @@ class JobRunner:
             return await self._run_job(job)
 
     async def run_next(self) -> Optional[Job]:
-        job = next((j for j in self.jobs if j.status == JobStatus.PENDING), None)
+        job = next(
+            (j for j in self.jobs if j.status == JobStatus.PENDING and self._is_eligible(j)),
+            None,
+        )
 
         if not job:
             return None
@@ -133,7 +175,9 @@ class JobRunner:
             raise ValueError("max_concurrency must be >= 1")
 
         sem = asyncio.Semaphore(max_concurrency)
-        pending = [j for j in self.jobs if j.status == JobStatus.PENDING]
+        pending = [
+            j for j in self.jobs if j.status == JobStatus.PENDING and self._is_eligible(j)
+        ]
 
         if not pending:
             return

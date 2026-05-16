@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Dict, Any, Annotated
 from annotated_types import Ge
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import uuid
 
 
@@ -35,6 +35,9 @@ class Job:
     timeout: Optional[Timeout] = None
     attempt_count: int = 0
     max_attempts: int = 3
+    scheduled_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
     def __repr__(self) -> str:
         return (

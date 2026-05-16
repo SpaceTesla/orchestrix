@@ -15,3 +15,10 @@ async def generate_report(payload):
 
 async def failing_job(payload):
     raise Exception("Intentional failure for testing")
+
+
+async def long_running_job(payload):
+    """Simulates a hung job for reaper / kill -9 testing."""
+    duration = float(payload.get("duration_seconds", 600))
+    print(f"[long_running_job] sleeping {duration}s")
+    await asyncio.sleep(duration)

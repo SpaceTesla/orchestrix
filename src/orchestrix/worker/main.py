@@ -10,8 +10,12 @@ from orchestrix.db import queries
 from orchestrix.db.pool import get_pool, init_pool
 from orchestrix.queue.priority import ALL_JOB_STREAMS
 from orchestrix.queue.redis_client import RedisQueue
+from orchestrix.handlers.sample_handlers import failing_job, long_running_job
+from orchestrix.worker.reaper import reaper_loop
 from orchestrix.rate_limit.gate import wait_until_allowed
 from orchestrix.rate_limit.redis_rate_limiter import RedisRateLimiter
+from orchestrix.worker.failure import handle_job_failure
+from orchestrix.worker.scheduling import wait_until_eligible
 
 
 def get_worker_id() -> str:
@@ -48,6 +52,8 @@ async def _process_message(
         await queue.ack(stream, message_id)
         return
 
+    await wait_until_eligible(job, worker_id=worker_id)
+
     tenant_id = str(job["tenant_id"])
     tenant_config = await tenant_cache.get_tenant_config(tenant_id)
 
@@ -75,8 +81,24 @@ async def _process_message(
         try:
             job = await queries.get_job(conn, job_id)
 
-            print(f"[{worker_id}] Executing {job['id']} (priority={job['priority']})")
-            await asyncio.sleep(10)
+            print(
+                f"[{worker_id}] Executing {job['id']} "
+                f"(priority={job['priority']}, attempt={job['attempt_count'] + 1})"
+            )
+
+            timeout = settings.job_timeout_seconds
+
+            async def _execute() -> None:
+                if job["job_type"] == "failing_job":
+                    await failing_job(job["payload"])
+                elif job["job_type"] == "long_running_job":
+                    await long_running_job(job["payload"])
+                else:
+                    await asyncio.sleep(10)
+
+            async with asyncio.timeout(timeout):
+                await _execute()
+
             await queries.transition_status(
                 conn,
                 job_id=job_id,
@@ -88,15 +110,37 @@ async def _process_message(
             await queue.ack(stream, message_id)
 
             print(f"[{worker_id}] Completed {job['id']}")
+        except TimeoutError:
+            print(
+                f"[{worker_id}] Failed {job['id']}: "
+                f"timeout after {settings.job_timeout_seconds}s"
+            )
+            job_after_run = await queries.get_job(conn, job_id)
+            if job_after_run is None:
+                await queue.ack(stream, message_id)
+                return
+
+            await handle_job_failure(
+                conn,
+                queue=queue,
+                worker_id=worker_id,
+                job=job_after_run,
+                error_message=f"timeout after {settings.job_timeout_seconds}s",
+            )
+            await queue.ack(stream, message_id)
         except Exception as e:
             print(f"[{worker_id}] Failed {job['id']}: {e}")
 
-            await queries.transition_status(
+            job_after_run = await queries.get_job(conn, job_id)
+            if job_after_run is None:
+                await queue.ack(stream, message_id)
+                return
+
+            await handle_job_failure(
                 conn,
-                job_id=job_id,
-                old_status="running",
-                new_status="failed",
+                queue=queue,
                 worker_id=worker_id,
+                job=job_after_run,
                 error_message=str(e),
             )
 
@@ -151,9 +195,25 @@ async def worker() -> None:
 
     worker_id = get_worker_id()
 
-    print(f"[{worker_id}] Worker started (weighted poll: 5 high / 3 normal / 1 low)")
+    reaper_id = f"{worker_id}-reaper"
+    shutdown = asyncio.Event()
+
+    print(
+        f"[{worker_id}] Worker started (weighted poll: 5 high / 3 normal / 1 low, "
+        f"job_timeout={settings.job_timeout_seconds}s, "
+        f"reaper_threshold={settings.reaper_threshold_seconds}s)"
+    )
 
     pool = get_pool()
+    reaper_task = asyncio.create_task(
+        reaper_loop(
+            pool=pool,
+            queue=queue,
+            reaper_id=reaper_id,
+            shutdown=shutdown,
+        ),
+        name="reaper",
+    )
 
     try:
         while True:
@@ -197,6 +257,12 @@ async def worker() -> None:
                     tenant_cache=tenant_cache,
                 )
     finally:
+        shutdown.set()
+        reaper_task.cancel()
+        try:
+            await reaper_task
+        except asyncio.CancelledError:
+            pass
         await redis.aclose()
 
 

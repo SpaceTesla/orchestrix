@@ -14,6 +14,14 @@ class Settings(BaseSettings):
     # Phase 6: single tenant; Phase 7 adds explicit tenant selection per request.
     default_tenant_name: str = "default"
 
+    retry_base_delay_seconds: float = 1.0
+    retry_max_delay_seconds: float = 300.0
+
+    job_timeout_seconds: float = 60.0
+    reaper_threshold_seconds: float = 180.0
+    reaper_interval_seconds: float = 30.0
+    reaper_batch_size: int = 100
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="",
