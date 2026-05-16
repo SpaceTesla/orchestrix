@@ -6,20 +6,37 @@ from redis.asyncio import Redis
 
 from orchestrix.cache.tenant_config_cache import TenantConfigCache
 from orchestrix.config import settings
+from orchestrix.core.logging import (
+    bind_job_context,
+    clear_job_context,
+    configure_logging,
+    get_logger,
+)
 from orchestrix.db import queries
 from orchestrix.db.pool import get_pool, init_pool
+from orchestrix.handlers import execute, register_handlers
 from orchestrix.queue.priority import ALL_JOB_STREAMS
 from orchestrix.queue.redis_client import RedisQueue
-from orchestrix.handlers import execute, register_handlers
-from orchestrix.worker.reaper import reaper_loop
 from orchestrix.rate_limit.gate import wait_until_allowed
 from orchestrix.rate_limit.redis_rate_limiter import RedisRateLimiter
 from orchestrix.worker.failure import handle_job_failure
+from orchestrix.worker.reaper import reaper_loop
 from orchestrix.worker.scheduling import wait_until_eligible
+
+log = get_logger(__name__)
 
 
 def get_worker_id() -> str:
     return f"{socket.gethostname()}-{os.getpid()}"
+
+
+def _bind_job_from_record(job, *, worker_id: str) -> None:
+    bind_job_context(
+        job_id=str(job["id"]),
+        tenant_id=str(job["tenant_id"]),
+        worker_id=worker_id,
+        attempt_count=int(job["attempt_count"]),
+    )
 
 
 async def _process_message(
@@ -33,108 +50,132 @@ async def _process_message(
     limiter: RedisRateLimiter,
     tenant_cache: TenantConfigCache,
 ) -> None:
+    worker_log = log.bind(worker_id=worker_id, component="worker")
     job_id = data["job_id"]
 
-    print(f"[{worker_id}] Received {job_id} from {stream}")
+    worker_log.debug(
+        "job_message_received",
+        job_id=job_id,
+        stream=stream,
+        message_id=message_id,
+    )
 
     async with pool.acquire() as conn:
         job = await queries.get_job(conn, job_id)
 
     if job is None:
-        print(f"[{worker_id}] Job not found {job_id}, acking")
+        worker_log.warning("job_not_found", job_id=job_id)
         await queue.ack(stream, message_id)
         return
 
     if job["status"] != "pending":
-        print(
-            f"[{worker_id}] Skipping {job_id} (status={job['status']}), acking"
+        worker_log.warning(
+            "job_skipped_wrong_status",
+            job_id=job_id,
+            status=job["status"],
         )
         await queue.ack(stream, message_id)
         return
 
-    await wait_until_eligible(job, worker_id=worker_id)
+    _bind_job_from_record(job, worker_id=worker_id)
+    try:
+        await wait_until_eligible(job, worker_id=worker_id)
 
-    tenant_id = str(job["tenant_id"])
-    tenant_config = await tenant_cache.get_tenant_config(tenant_id)
+        tenant_id = str(job["tenant_id"])
+        tenant_config = await tenant_cache.get_tenant_config(tenant_id)
 
-    await wait_until_allowed(
-        limiter,
-        tenant_id=tenant_id,
-        max_tokens=tenant_config["burst_capacity"],
-        refill_rate=tenant_config["rate_limit_rps"],
-    )
-
-    async with pool.acquire() as conn:
-        claimed = await queries.transition_status(
-            conn,
-            job_id=job_id,
-            old_status="pending",
-            new_status="running",
-            worker_id=worker_id,
+        await wait_until_allowed(
+            limiter,
+            tenant_id=tenant_id,
+            max_tokens=tenant_config["burst_capacity"],
+            refill_rate=tenant_config["rate_limit_rps"],
         )
 
-        if not claimed:
-            print(f"[{worker_id}] Lost race for {job_id}")
-            await queue.ack(stream, message_id)
-            return
-
-        try:
-            job = await queries.get_job(conn, job_id)
-
-            print(
-                f"[{worker_id}] Executing {job['id']} "
-                f"(priority={job['priority']}, attempt={job['attempt_count'] + 1})"
-            )
-
-            async with asyncio.timeout(settings.job_timeout_seconds):
-                await execute(str(job["job_type"]), job["payload"])
-
-            await queries.transition_status(
+        async with pool.acquire() as conn:
+            claimed = await queries.transition_status(
                 conn,
                 job_id=job_id,
-                old_status="running",
-                new_status="success",
+                old_status="pending",
+                new_status="running",
                 worker_id=worker_id,
             )
 
-            await queue.ack(stream, message_id)
-
-            print(f"[{worker_id}] Completed {job['id']}")
-        except TimeoutError:
-            print(
-                f"[{worker_id}] Failed {job['id']}: "
-                f"timeout after {settings.job_timeout_seconds}s"
-            )
-            job_after_run = await queries.get_job(conn, job_id)
-            if job_after_run is None:
+            if not claimed:
+                worker_log.warning("job_claim_lost_race", job_id=job_id)
                 await queue.ack(stream, message_id)
                 return
 
-            await handle_job_failure(
-                conn,
-                queue=queue,
-                worker_id=worker_id,
-                job=job_after_run,
-                error_message=f"timeout after {settings.job_timeout_seconds}s",
-            )
-            await queue.ack(stream, message_id)
-        except Exception as e:
-            print(f"[{worker_id}] Failed {job['id']}: {e}")
-
-            job_after_run = await queries.get_job(conn, job_id)
-            if job_after_run is None:
+            job = await queries.get_job(conn, job_id)
+            if job is None:
+                worker_log.warning("job_missing_after_claim", job_id=job_id)
                 await queue.ack(stream, message_id)
                 return
 
-            await handle_job_failure(
-                conn,
-                queue=queue,
-                worker_id=worker_id,
-                job=job_after_run,
-                error_message=str(e),
+            _bind_job_from_record(job, worker_id=worker_id)
+
+            worker_log.info(
+                "job_executing",
+                job_type=str(job["job_type"]),
+                priority=job["priority"],
+                execution_attempt=int(job["attempt_count"]),
             )
 
-            await queue.ack(stream, message_id)
+            try:
+                async with asyncio.timeout(settings.job_timeout_seconds):
+                    await execute(str(job["job_type"]), job["payload"])
+
+                await queries.transition_status(
+                    conn,
+                    job_id=job_id,
+                    old_status="running",
+                    new_status="success",
+                    worker_id=worker_id,
+                )
+
+                await queue.ack(stream, message_id)
+                worker_log.info("job_completed")
+            except TimeoutError:
+                worker_log.error(
+                    "job_timeout",
+                    exc_info=True,
+                    timeout_seconds=settings.job_timeout_seconds,
+                )
+                job_after_run = await queries.get_job(conn, job_id)
+                if job_after_run is None:
+                    await queue.ack(stream, message_id)
+                    return
+
+                await handle_job_failure(
+                    conn,
+                    queue=queue,
+                    worker_id=worker_id,
+                    job=job_after_run,
+                    error_message=f"timeout after {settings.job_timeout_seconds}s",
+                )
+                await queue.ack(stream, message_id)
+            except Exception as e:
+                worker_log.error(
+                    "job_handler_failed",
+                    exc_info=True,
+                    error=str(e),
+                )
+
+                job_after_run = await queries.get_job(conn, job_id)
+                if job_after_run is None:
+                    await queue.ack(stream, message_id)
+                    return
+
+                await handle_job_failure(
+                    conn,
+                    queue=queue,
+                    worker_id=worker_id,
+                    job=job_after_run,
+                    error_message=str(e),
+                )
+
+                await queue.ack(stream, message_id)
+    finally:
+        clear_job_context()
 
 
 async def _drain_autoclaim(
@@ -174,6 +215,10 @@ async def _drain_autoclaim(
 
 
 async def worker() -> None:
+    configure_logging(
+        log_level=settings.log_level,
+        log_format=settings.log_format,
+    )
     register_handlers()
     await init_pool()
 
@@ -185,14 +230,15 @@ async def worker() -> None:
     tenant_cache = TenantConfigCache(redis)
 
     worker_id = get_worker_id()
+    worker_log = log.bind(worker_id=worker_id, component="worker")
 
     reaper_id = f"{worker_id}-reaper"
     shutdown = asyncio.Event()
 
-    print(
-        f"[{worker_id}] Worker started (weighted poll: 5 high / 3 normal / 1 low, "
-        f"job_timeout={settings.job_timeout_seconds}s, "
-        f"reaper_threshold={settings.reaper_threshold_seconds}s)"
+    worker_log.info(
+        "worker_started",
+        job_timeout_seconds=settings.job_timeout_seconds,
+        reaper_threshold_seconds=settings.reaper_threshold_seconds,
     )
 
     pool = get_pool()
@@ -226,14 +272,16 @@ async def worker() -> None:
                     )
                     reclaimed_total += reclaimed
                 if reclaimed_total:
-                    print(
-                        f"[{worker_id}] Reclaimed {reclaimed_total} pending messages"
+                    worker_log.info(
+                        "messages_autoclaimed",
+                        reclaimed_count=reclaimed_total,
                     )
                 continue
 
-            print(
-                f"[{worker_id}] Polled {stream}, "
-                f"dequeued {len(messages)} job(s)"
+            worker_log.debug(
+                "stream_polled",
+                stream=stream,
+                dequeued_count=len(messages),
             )
 
             for message_id, data in messages:
@@ -254,6 +302,7 @@ async def worker() -> None:
             await reaper_task
         except asyncio.CancelledError:
             pass
+        worker_log.info("worker_stopped")
         await redis.aclose()
 
 

@@ -3,10 +3,13 @@ from dataclasses import dataclass
 from asyncpg import Connection, Record
 from asyncpg.exceptions import UniqueViolationError
 
+from orchestrix.core.logging import get_logger
 from orchestrix.db import queries
 from orchestrix.queue.priority import JobPriority
 from orchestrix.queue.redis_client import RedisQueue
 from orchestrix.services.exceptions import JobNotFoundError
+
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,13 @@ async def create_job(
         job = await queries.get_job(conn, str(existing["id"]))
         if job is None:
             raise RuntimeError(f"idempotency key references missing job {existing['id']}")
+        log.info(
+            "job_idempotent_replay",
+            job_id=str(job["id"]),
+            tenant_id=tenant_id,
+            job_type=job_type,
+            priority=priority.value,
+        )
         return CreateJobResult(job=job, was_created=False)
 
     try:
@@ -56,12 +66,26 @@ async def create_job(
         job = await queries.get_job(conn, str(existing["id"]))
         if job is None:
             raise RuntimeError(f"idempotency key references missing job {existing['id']}")
+        log.info(
+            "job_idempotent_replay",
+            job_id=str(job["id"]),
+            tenant_id=tenant_id,
+            job_type=job_type,
+            priority=priority.value,
+        )
         return CreateJobResult(job=job, was_created=False)
 
     await queue.enqueue(str(job["id"]), priority)
     full_job = await queries.get_job(conn, str(job["id"]))
     if full_job is None:
         raise RuntimeError(f"job {job['id']} missing immediately after insert")
+    log.info(
+        "job_created",
+        job_id=str(full_job["id"]),
+        tenant_id=tenant_id,
+        job_type=job_type,
+        priority=priority.value,
+    )
     return CreateJobResult(job=full_job, was_created=True)
 
 

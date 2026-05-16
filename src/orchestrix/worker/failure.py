@@ -3,9 +3,12 @@ from datetime import datetime, timedelta, timezone
 from asyncpg import Record
 
 from orchestrix.config import settings
+from orchestrix.core.logging import get_logger
 from orchestrix.db import queries
 from orchestrix.queue.redis_client import RedisQueue
 from orchestrix.retry.backoff import compute_retry_delay_seconds, should_retry
+
+log = get_logger(__name__)
 
 
 async def handle_job_failure(
@@ -46,11 +49,11 @@ async def handle_job_failure(
             return "lost_race"
 
         await queue.enqueue(job_id, str(job["priority"]))
-        print(
-            f"[{worker_id}] retry_scheduled job_id={job_id} "
-            f"attempt={attempt_count}/{max_attempts} "
-            f"delay_seconds={delay_seconds:.2f} "
-            f"scheduled_at={scheduled_at.isoformat()}"
+        log.info(
+            "job_retry_scheduled",
+            delay_seconds=round(delay_seconds, 2),
+            scheduled_at=scheduled_at.isoformat(),
+            max_attempts=max_attempts,
         )
         return "retry_scheduled"
 
@@ -63,8 +66,9 @@ async def handle_job_failure(
     if not marked:
         return "lost_race"
 
-    print(
-        f"[{worker_id}] job_dead job_id={job_id} "
-        f"attempt={attempt_count}/{max_attempts} error={error_message}"
+    log.warning(
+        "job_marked_dead",
+        error_message=error_message,
+        max_attempts=max_attempts,
     )
     return "job_dead"

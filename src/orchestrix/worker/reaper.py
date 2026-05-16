@@ -1,8 +1,11 @@
 import asyncio
 
 from orchestrix.config import settings
+from orchestrix.core.logging import get_logger
 from orchestrix.db import queries
 from orchestrix.queue.redis_client import RedisQueue
+
+log = get_logger(__name__)
 
 
 async def reap_orphaned_jobs(
@@ -42,11 +45,15 @@ async def reap_orphaned_jobs(
         if new_status == "pending":
             await queue.enqueue(job_id, str(result["priority"]))
 
-        print(
-            f"[{reaper_id}] reaped job_id={job_id} "
-            f"previous_worker={row['worker_id']} "
-            f"new_status={new_status} "
-            f"attempt={result['attempt_count']}/{result['max_attempts']}"
+        log.info(
+            "job_reaped",
+            job_id=job_id,
+            tenant_id=str(row["tenant_id"]),
+            worker_id=reaper_id,
+            attempt_count=int(result["attempt_count"]),
+            previous_worker=row["worker_id"],
+            new_status=new_status,
+            max_attempts=int(result["max_attempts"]),
         )
 
     return reaped
@@ -59,10 +66,11 @@ async def reaper_loop(
     reaper_id: str,
     shutdown: asyncio.Event,
 ) -> None:
-    print(
-        f"[{reaper_id}] Reaper started "
-        f"(interval={settings.reaper_interval_seconds}s, "
-        f"threshold={settings.reaper_threshold_seconds}s)"
+    reaper_log = log.bind(worker_id=reaper_id, component="reaper")
+    reaper_log.info(
+        "reaper_started",
+        interval_seconds=settings.reaper_interval_seconds,
+        threshold_seconds=settings.reaper_threshold_seconds,
     )
 
     while not shutdown.is_set():
@@ -73,9 +81,9 @@ async def reaper_loop(
                 reaper_id=reaper_id,
             )
             if count:
-                print(f"[{reaper_id}] Reaper cycle reclaimed {count} job(s)")
-        except Exception as e:
-            print(f"[{reaper_id}] Reaper error: {e}")
+                reaper_log.info("reaper_cycle_complete", reaped_count=count)
+        except Exception:
+            reaper_log.error("reaper_error", exc_info=True)
 
         try:
             await asyncio.wait_for(
@@ -85,4 +93,4 @@ async def reaper_loop(
         except asyncio.TimeoutError:
             continue
 
-    print(f"[{reaper_id}] Reaper stopped")
+    reaper_log.info("reaper_stopped")

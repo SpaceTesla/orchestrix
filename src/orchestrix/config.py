@@ -1,4 +1,4 @@
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     reaper_threshold_seconds: float = 180.0
     reaper_interval_seconds: float = 30.0
     reaper_batch_size: int = 100
+
+    log_level: str = "INFO"
+    log_format: Literal["json", "console"] = "console"
 
     model_config = SettingsConfigDict(
         env_file=".env",

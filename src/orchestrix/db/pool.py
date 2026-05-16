@@ -1,5 +1,9 @@
 import asyncpg
+
 from orchestrix.config import settings
+from orchestrix.core.logging import get_logger
+
+log = get_logger(__name__)
 
 _pool: asyncpg.Pool | None = None
 
@@ -8,12 +12,16 @@ async def init_pool() -> asyncpg.Pool:
     global _pool
 
     if _pool is None:
-        _pool = await asyncpg.create_pool(
-            dsn=settings.database_url,
-            min_size=2,
-            max_size=10,
-            command_timeout=30,
-        )
+        try:
+            _pool = await asyncpg.create_pool(
+                dsn=settings.database_url,
+                min_size=2,
+                max_size=10,
+                command_timeout=30,
+            )
+        except Exception:
+            log.critical("db_pool_init_failed", exc_info=True)
+            raise
 
     return _pool
 

@@ -2,8 +2,10 @@ from typing import TypedDict
 
 from redis.asyncio import Redis
 
+from orchestrix.core.logging import get_logger
 from orchestrix.db.pool import get_pool
 
+log = get_logger(__name__)
 
 CACHE_TTL_SECONDS = 60
 
@@ -24,32 +26,16 @@ class TenantConfigCache:
         self,
         tenant_id: str,
     ) -> TenantConfig:
-        # -----------------------------------------
-        # Redis cache key
-        # -----------------------------------------
-
         cache_key = f"tenant_config:{tenant_id}"
-
-        # -----------------------------------------
-        # Attempt cache read
-        # -----------------------------------------
 
         cached_config = await self.redis.hgetall(cache_key)
 
-        # -----------------------------------------
-        # Cache hit
-        # -----------------------------------------
-
         if cached_config:
-            print("Cache found")
+            log.debug("tenant_config_cache_hit", tenant_id=tenant_id)
             return {
                 "rate_limit_rps": float(cached_config["rate_limit_rps"]),
                 "burst_capacity": float(cached_config["burst_capacity"]),
             }
-
-        # -----------------------------------------
-        # Cache miss → fetch from Postgres
-        # -----------------------------------------
 
         pool = get_pool()
 
@@ -72,10 +58,6 @@ class TenantConfigCache:
             "burst_capacity": float(row["burst_capacity"]),
         }
 
-        # -----------------------------------------
-        # Store in Redis cache
-        # -----------------------------------------
-
         await self.redis.hset(
             cache_key,
             mapping={
@@ -89,8 +71,5 @@ class TenantConfigCache:
             CACHE_TTL_SECONDS,
         )
 
-        # -----------------------------------------
-        # Return config
-        # -----------------------------------------
-
+        log.debug("tenant_config_cache_miss", tenant_id=tenant_id)
         return config

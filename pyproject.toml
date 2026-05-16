@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2.14.0",
     "redis[hiredis]>=7.4.0",
     "rich>=15.0.0",
+    "structlog>=25.5.0",
     "uvicorn>=0.46.0",
 ]
 
