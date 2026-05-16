@@ -2,6 +2,12 @@ import redis.asyncio as redis
 from typing import List, Tuple
 
 from orchestrix.config import settings
+from orchestrix.queue.priority import (
+    ALL_JOB_STREAMS,
+    POLL_SEQUENCE,
+    JobPriority,
+    stream_for_priority,
+)
 
 
 _queue = None
@@ -11,36 +17,45 @@ class RedisQueue:
     def __init__(
         self,
         url: str,
-        stream_name: str = "jobs:queue",
         group_name: str = "workers",
     ):
         self.redis = redis.from_url(url, decode_responses=True)
-        self.stream = stream_name
         self.group = group_name
+        self._poll_index = 0
 
-    async def create_group(self) -> None:
+    def next_poll_stream(self) -> str:
+        stream = POLL_SEQUENCE[self._poll_index]
+        self._poll_index = (self._poll_index + 1) % len(POLL_SEQUENCE)
+        return stream
+
+    async def create_groups(self) -> None:
+        for stream in ALL_JOB_STREAMS:
+            await self._create_group(stream)
+
+    async def _create_group(self, stream: str) -> None:
         try:
             await self.redis.xgroup_create(
-                name=self.stream,
+                name=stream,
                 groupname=self.group,
                 id="$",
                 mkstream=True,
             )
         except redis.ResponseError as e:
             if "BUSYGROUP" in str(e):
-                # group already exists → fine
                 return
             raise
 
-    async def enqueue(self, job_id: str) -> str:
+    async def enqueue(self, job_id: str, priority: JobPriority | str) -> str:
+        stream = stream_for_priority(priority)
         message_id = await self.redis.xadd(
-            self.stream,
+            stream,
             {"job_id": job_id},
         )
         return message_id
 
     async def read(
         self,
+        stream: str,
         consumer_name: str,
         count: int = 1,
         block: int = 2000,
@@ -48,7 +63,7 @@ class RedisQueue:
         response = await self.redis.xreadgroup(
             groupname=self.group,
             consumername=consumer_name,
-            streams={self.stream: ">"},
+            streams={stream: ">"},
             count=count,
             block=block,
         )
@@ -58,24 +73,24 @@ class RedisQueue:
 
         messages = []
 
-        for stream, entries in response:
+        for _stream_name, entries in response:
             for message_id, data in entries:
                 messages.append((message_id, data))
 
         return messages
 
-    async def ack(self, message_id: str) -> None:
-        await self.redis.xack(self.stream, self.group, message_id)
+    async def ack(self, stream: str, message_id: str) -> None:
+        await self.redis.xack(stream, self.group, message_id)
 
     async def autoclaim(
         self,
+        stream: str,
         consumer_name: str,
-        min_idle_time: int = 60000,  # ms
+        min_idle_time: int = 60000,
         count: int = 10,
     ):
-        # redis-py may return (next_id, messages) or (next_id, messages, deleted_ids)
         result = await self.redis.xautoclaim(
-            name=self.stream,
+            name=stream,
             groupname=self.group,
             consumername=consumer_name,
             min_idle_time=min_idle_time,
@@ -87,7 +102,7 @@ class RedisQueue:
         return messages
 
     async def close(self):
-        self.redis.close()
+        await self.redis.aclose()
 
 
 async def init_redis_queue() -> RedisQueue:
@@ -112,6 +127,6 @@ async def close_redis():
     global _queue
 
     if _queue:
-        _queue.close()
+        await _queue.close()
 
     _queue = None

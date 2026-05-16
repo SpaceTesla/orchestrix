@@ -7,6 +7,7 @@ _JOB_JSON = "application/json"
 JOB_CREATED_EXAMPLE = {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "status": "pending",
+    "priority": "normal",
     "created": True,
 }
 
@@ -19,6 +20,7 @@ JOB_REPLAYED_EXAMPLE = {
 JOB_GET_EXAMPLE = {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "status": "pending",
+    "priority": "normal",
 }
 
 VALIDATION_ERROR_EXAMPLE = {

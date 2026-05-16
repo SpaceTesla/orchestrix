@@ -76,17 +76,19 @@ async def create_job(
     job_type: str,
     payload: dict,
     idempotency_key: str,
+    priority: str = "normal",
 ) -> Record:
     return await conn.fetchrow(
         """
-        INSERT INTO jobs (tenant_id, job_type, payload, idempotency_key)
-        VALUES ($1, $2, $3::jsonb, $4::uuid)
-        RETURNING id, status
+        INSERT INTO jobs (tenant_id, job_type, payload, idempotency_key, priority)
+        VALUES ($1, $2, $3::jsonb, $4::uuid, $5)
+        RETURNING id, status, priority
         """,
         tenant_id,
         job_type,
         json.dumps(payload),
         idempotency_key,
+        priority,
     )
 
 
@@ -129,7 +131,7 @@ async def list_jobs(
     if status:
         return await conn.fetch(
             """
-            SELECT id, job_type, status, created_at
+            SELECT id, job_type, status, priority, created_at
             FROM jobs
             WHERE status = $1
             ORDER BY created_at DESC
@@ -141,7 +143,7 @@ async def list_jobs(
 
     return await conn.fetch(
         """
-        SELECT id, job_type, status, created_at
+        SELECT id, job_type, status, priority, created_at
         FROM jobs
         ORDER BY created_at DESC
         LIMIT $1

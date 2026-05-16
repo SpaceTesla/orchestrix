@@ -4,6 +4,7 @@ from asyncpg import Connection, Record
 from asyncpg.exceptions import UniqueViolationError
 
 from orchestrix.db import queries
+from orchestrix.queue.priority import JobPriority
 from orchestrix.queue.redis_client import RedisQueue
 from orchestrix.services.exceptions import JobNotFoundError
 
@@ -23,6 +24,7 @@ async def create_job(
     job_type: str,
     payload: dict,
     idempotency_key: str,
+    priority: JobPriority = JobPriority.NORMAL,
 ) -> CreateJobResult:
     existing = await queries.get_job_by_idempotency_key(
         conn, tenant_id, idempotency_key
@@ -41,6 +43,7 @@ async def create_job(
             job_type=job_type,
             payload=payload,
             idempotency_key=idempotency_key,
+            priority=priority.value,
         )
     except UniqueViolationError:
         existing = await queries.get_job_by_idempotency_key(
@@ -54,7 +57,7 @@ async def create_job(
             was_created=False,
         )
 
-    await queue.enqueue(str(job["id"]))
+    await queue.enqueue(str(job["id"]), priority)
     return CreateJobResult(
         job_id=str(job["id"]),
         status=str(job["status"]),

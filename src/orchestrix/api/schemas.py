@@ -3,16 +3,20 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Literal
 
+from orchestrix.queue.priority import JobPriority
+
 
 class JobCreateRequest(BaseModel):
     tenant_id: UUID
     job_type: str
     payload: Dict[str, Any] = Field(default_factory=dict)
+    priority: JobPriority = JobPriority.NORMAL
 
 
 class JobResponse(BaseModel):
     id: str
     status: str
+    priority: str | None = None
     created: bool | None = None
 
 

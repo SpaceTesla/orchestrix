@@ -68,6 +68,7 @@ async def create_job(
         job_type=request.job_type,
         payload=request.payload,
         idempotency_key=str(idempotency_key),
+        priority=request.priority,
     )
     body = job_to_response(
         {"id": result.job_id, "status": result.status},

@@ -8,6 +8,7 @@ from orchestrix.cache.tenant_config_cache import TenantConfigCache
 from orchestrix.config import settings
 from orchestrix.db import queries
 from orchestrix.db.pool import get_pool, init_pool
+from orchestrix.queue.priority import ALL_JOB_STREAMS
 from orchestrix.queue.redis_client import RedisQueue
 from orchestrix.rate_limit.gate import wait_until_allowed
 from orchestrix.rate_limit.redis_rate_limiter import RedisRateLimiter
@@ -20,6 +21,7 @@ def get_worker_id() -> str:
 async def _process_message(
     *,
     queue: RedisQueue,
+    stream: str,
     pool,
     worker_id: str,
     message_id: str,
@@ -29,21 +31,21 @@ async def _process_message(
 ) -> None:
     job_id = data["job_id"]
 
-    print(f"[{worker_id}] Received {job_id}")
+    print(f"[{worker_id}] Received {job_id} from {stream}")
 
     async with pool.acquire() as conn:
         job = await queries.get_job(conn, job_id)
 
     if job is None:
         print(f"[{worker_id}] Job not found {job_id}, acking")
-        await queue.ack(message_id)
+        await queue.ack(stream, message_id)
         return
 
     if job["status"] != "pending":
         print(
             f"[{worker_id}] Skipping {job_id} (status={job['status']}), acking"
         )
-        await queue.ack(message_id)
+        await queue.ack(stream, message_id)
         return
 
     tenant_id = str(job["tenant_id"])
@@ -67,13 +69,13 @@ async def _process_message(
 
         if not claimed:
             print(f"[{worker_id}] Lost race for {job_id}")
-            await queue.ack(message_id)
+            await queue.ack(stream, message_id)
             return
 
         try:
             job = await queries.get_job(conn, job_id)
 
-            print(f"[{worker_id}] Executing {job['id']}")
+            print(f"[{worker_id}] Executing {job['id']} (priority={job['priority']})")
             await asyncio.sleep(10)
             await queries.transition_status(
                 conn,
@@ -83,7 +85,7 @@ async def _process_message(
                 worker_id=worker_id,
             )
 
-            await queue.ack(message_id)
+            await queue.ack(stream, message_id)
 
             print(f"[{worker_id}] Completed {job['id']}")
         except Exception as e:
@@ -98,12 +100,13 @@ async def _process_message(
                 error_message=str(e),
             )
 
-            await queue.ack(message_id)
+            await queue.ack(stream, message_id)
 
 
 async def _drain_autoclaim(
     *,
     queue: RedisQueue,
+    stream: str,
     pool,
     worker_id: str,
     min_idle_time_ms: int,
@@ -112,6 +115,7 @@ async def _drain_autoclaim(
     tenant_cache: TenantConfigCache,
 ) -> int:
     reclaimed = await queue.autoclaim(
+        stream=stream,
         consumer_name=worker_id,
         min_idle_time=min_idle_time_ms,
         count=count,
@@ -123,6 +127,7 @@ async def _drain_autoclaim(
     for message_id, data in reclaimed:
         await _process_message(
             queue=queue,
+            stream=stream,
             pool=pool,
             worker_id=worker_id,
             message_id=message_id,
@@ -138,7 +143,7 @@ async def worker() -> None:
     await init_pool()
 
     queue = RedisQueue(settings.redis_url)
-    await queue.create_group()
+    await queue.create_groups()
 
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     limiter = RedisRateLimiter(redis)
@@ -146,33 +151,44 @@ async def worker() -> None:
 
     worker_id = get_worker_id()
 
-    print(f"[{worker_id}] Worker started")
+    print(f"[{worker_id}] Worker started (weighted poll: 5 high / 3 normal / 1 low)")
 
     pool = get_pool()
 
     try:
         while True:
-            messages = await queue.read(worker_id, count=5)
+            stream = queue.next_poll_stream()
+            messages = await queue.read(stream, worker_id, count=5)
 
             if not messages:
-                reclaimed = await _drain_autoclaim(
-                    queue=queue,
-                    pool=pool,
-                    worker_id=worker_id,
-                    min_idle_time_ms=30_000,
-                    count=10,
-                    limiter=limiter,
-                    tenant_cache=tenant_cache,
-                )
-                if reclaimed:
+                reclaimed_total = 0
+                for autoclaim_stream in ALL_JOB_STREAMS:
+                    reclaimed = await _drain_autoclaim(
+                        queue=queue,
+                        stream=autoclaim_stream,
+                        pool=pool,
+                        worker_id=worker_id,
+                        min_idle_time_ms=30_000,
+                        count=10,
+                        limiter=limiter,
+                        tenant_cache=tenant_cache,
+                    )
+                    reclaimed_total += reclaimed
+                if reclaimed_total:
                     print(
-                        f"[{worker_id}] Reclaimed {reclaimed} pending messages"
+                        f"[{worker_id}] Reclaimed {reclaimed_total} pending messages"
                     )
                 continue
+
+            print(
+                f"[{worker_id}] Polled {stream}, "
+                f"dequeued {len(messages)} job(s)"
+            )
 
             for message_id, data in messages:
                 await _process_message(
                     queue=queue,
+                    stream=stream,
                     pool=pool,
                     worker_id=worker_id,
                     message_id=message_id,

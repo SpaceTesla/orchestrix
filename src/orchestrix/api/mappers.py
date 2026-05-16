@@ -8,8 +8,10 @@ def job_to_response(
     *,
     created: bool | None = None,
 ) -> JobResponse:
+    priority = record.get("priority")
     return JobResponse(
         id=str(record["id"]),
         status=str(record["status"]),
+        priority=str(priority) if priority is not None else None,
         created=created,
     )
