@@ -1,6 +1,10 @@
 import asyncio
 
 
+async def test_job(payload: dict) -> None:
+    await asyncio.sleep(10)
+
+
 async def send_email(payload):
     print(f"[EMAIL] Sending email to {payload.get('to')}")
     await asyncio.sleep(2)

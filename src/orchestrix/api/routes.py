@@ -70,10 +70,7 @@ async def create_job(
         idempotency_key=str(idempotency_key),
         priority=request.priority,
     )
-    body = job_to_response(
-        {"id": result.job_id, "status": result.status},
-        created=result.was_created,
-    )
+    body = job_to_response(result.job, created=result.was_created)
     status_code = 201 if result.was_created else 200
     headers = {"Location": f"/jobs/{result.job_id}"} if result.was_created else None
     return api_response(body, status_code=status_code, headers=headers)

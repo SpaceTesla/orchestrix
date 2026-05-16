@@ -1,3 +1,6 @@
+from typing import Self
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +30,16 @@ class Settings(BaseSettings):
         env_prefix="",
         case_sensitive=False,
     )
+
+    @model_validator(mode="after")
+    def validate_reaper_vs_job_timeout(self) -> Self:
+        if self.reaper_threshold_seconds <= self.job_timeout_seconds:
+            raise ValueError(
+                "reaper_threshold_seconds must be greater than job_timeout_seconds "
+                f"(got reaper={self.reaper_threshold_seconds}, "
+                f"job_timeout={self.job_timeout_seconds})"
+            )
+        return self
 
 
 settings = Settings()

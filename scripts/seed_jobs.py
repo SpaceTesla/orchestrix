@@ -13,7 +13,8 @@ import httpx
 from orchestrix.config import settings
 from orchestrix.db.pool import close_pool, init_pool
 
-JOB_TYPES = ["test", "email", "report", "fail"]
+# Must match handlers registered in orchestrix.handlers.register_handlers()
+JOB_TYPES = ["test", "send_email", "generate_report"]
 
 
 def _api_base() -> str:

@@ -1,16 +1,16 @@
 # Architecture
 
-> This document reflects the system as it exists **right now** (through **Phase 6**). Update the "Current State" section at the start of each new phase.
+> This document reflects the system as it exists **right now** (through **Phase 7**). Update the "Current State" section at the start of each new phase.
 
 ---
 
-## Current State — Phase 6 (Multi-worker + per-tenant rate limiting)
+## Current State — Phase 7 (Multi-tenancy, priority, retries, reaper)
 
 ```
                    ┌─────────────────────┐
                    │   Client / curl     │
                    └──────────┬──────────┘
-                              │ POST /jobs (tenant_id required)
+                              │ POST /jobs (tenant_id + Idempotency-Key)
                               ▼
                    ┌─────────────────────┐
                    │    FastAPI (API)    │
@@ -19,12 +19,12 @@
                    │ GET /jobs           │
                    └────┬───────────┬────┘
                         │           │
-               write job│           │ XADD job_id only
+               write job│           │ XADD job_id (priority stream)
                (PENDING)│           │
                         ▼           ▼
                ┌──────────────┐  ┌──────────────────────────────────┐
                │   Postgres   │  │            Redis                │
-               │  jobs        │  │  Stream: jobs:queue             │
+               │  jobs        │  │  jobs:high / jobs:normal / low  │
                │  job_events  │  │  Group: workers (per consumer)  │
                │  tenants     │  │  Cache: tenant_config:{tenant}  │
                └──────────────┘  │  Bucket: rate_limit:{tenant}    │
@@ -32,129 +32,83 @@
                         │                       │ XREADGROUP / XAUTOCLAIM
                         │                       ▼
                         │   ┌───────────────────────────────────────┐
-                        └───┤           Worker pool (N processes)      │
-                            │  1) Read message (at-least-once)       │
-                            │  2) Load job from Postgres              │
-                            │  3) Tenant config (Redis cache → DB)  │
-                            │  4) Rate limit gate (Lua token bucket)  │
-                            │  5) Optimistic lock → RUNNING           │
-                            │  6) Execute handler                     │
-                            │  7) XACK stream message                 │
-                            └───────────────────────────────────────────┘
+                        └───┤     Worker pool (N processes each)     │
+                            │  + reaper coroutine (orphan recovery)  │
+                            │  1) Read message (weighted poll)       │
+                            │  2) Load job; wait until scheduled_at  │
+                            │  3) Rate limit gate (Lua token bucket) │
+                            │  4) Optimistic lock → RUNNING          │
+                            │  5) Execute handler (timeout)          │
+                            │  6) SUCCESS / retry / DEAD + re-enqueue│
+                            │  7) XACK stream message                │
+                            └────────────────────────────────────────┘
 ```
 
-**Implemented through Phase 6:**
+**Implemented through Phase 7:**
 
-- Postgres persistence with optimistic locking and `job_events` audit trail
-- Redis Streams queue (`jobs:queue`) with consumer group `workers`
-- Separate API and worker processes; scale workers via Compose (`--scale worker=N`)
-- `XAUTOCLAIM` for reclaiming messages stuck in a consumer's PEL
-- `tenants` table; every job has `tenant_id`
-- Per-tenant token bucket in Redis (`rate_limit:{tenant_id}`), limits from `tenants` cached in Redis (`tenant_config:{tenant_id}`, 60s TTL)
-- Backoff with jitter when rate-limited (`wait_until_allowed` + `sleep_retry_after_with_jitter`)
+- Everything from Phase 6 (Postgres, Redis Streams, multi-worker, per-tenant rate limiting)
+- **Idempotency:** `Idempotency-Key` header (UUID); unique per `(tenant_id, idempotency_key)`; duplicate POST returns **200** with existing job
+- **Priority queues:** `jobs:high`, `jobs:normal`, `jobs:low`; worker **weighted poll** (5:3:1); enqueue on create, retry, and reaper reclaim
+- **Retries:** exponential backoff + jitter; `scheduled_at` for delayed eligibility; `retry_scheduled` / `job_dead` events
+- **DEAD:** terminal status when `attempt_count >= max_attempts` (handler failure or reaper)
+- **Reaper:** background coroutine per worker; stale `RUNNING` jobs reclaimed with optimistic `UPDATE`; `reaped` events; `reaper_threshold_seconds` > `job_timeout_seconds` (validated at startup)
+- **Handler registry:** `job_type` → async handler (`handlers/registry.py`)
 
-**What still does not exist yet (intentionally — Phase 7+):**
+**What still does not exist yet (intentionally — Phase 8+):**
 
-- Idempotency keys on `POST /jobs`
-- Priority streams (`jobs:high` / `jobs:normal` / `jobs:low`) and weighted polling
-- Retry with exponential backoff; `DEAD` after `max_attempts`
-- Reaper for orphaned `RUNNING` jobs
 - Transactional outbox / fix for Postgres-write-then-Redis-failure gap
 - Observability stack (Phase 8): structured logging, Prometheus, OpenTelemetry
+- Load testing harness (Phase 9)
 
 ---
 
-## Redis data model (Phase 6)
+## Redis data model (Phase 7)
 
 | Key | Type | Written by | Purpose |
 |-----|------|------------|---------|
-| `jobs:queue` | Stream | API (`XADD` on submit) | Work queue; payload is only `job_id` |
-| `tenant_config:{tenant_id}` | Hash | Worker on cache miss | Cached `rate_limit_rps`, `burst_capacity` from Postgres; **TTL 60s** |
-| `rate_limit:{tenant_id}` | Hash | Worker via Lua on each allow check | Token bucket state: `tokens`, `last_refill`; **TTL 3600s** (refreshed per check) |
+| `jobs:high` | Stream | API, worker (retry/reaper) | High-priority work queue; payload is only `job_id` |
+| `jobs:normal` | Stream | API, worker (retry/reaper) | Normal-priority work queue |
+| `jobs:low` | Stream | API, worker (retry/reaper) | Low-priority work queue |
+| `tenant_config:{tenant_id}` | Hash | Worker on cache miss | Cached `rate_limit_rps`, `burst_capacity`; **TTL 60s** |
+| `rate_limit:{tenant_id}` | Hash | Worker via Lua | Token bucket state; **TTL 3600s** |
 
-**Important:** Rate limiting runs at **execution time** (worker), not on `POST /jobs`. The API does not touch `tenant_config` or `rate_limit` keys.
+**Important:** Rate limiting runs at **execution time** (worker), not on `POST /jobs`.
 
 ---
 
 ## Job State Machine
-
-This state machine is the core invariant that must hold throughout all phases.
 
 ```
               submit()
                  │
                  ▼
             ┌─────────┐
-            │ PENDING │◄──────────────────┐
-            └────┬────┘                   │
-                 │ worker claims          │ reaper (Phase 7)
-                 ▼                        │ re-queues orphan
-            ┌─────────┐                   │
-            │ RUNNING │───────────────────┘
+            │ PENDING │◄────────────────────────┐
+            └────┬────┘                         │
+                 │ worker claims                 │ retry / reaper
+                 ▼                               │
+            ┌─────────┐──────────────────────────┘
+            │ RUNNING │
             └────┬────┘
                  │
-        ┌────────┴────────┐
-        │                 │
-        ▼                 ▼
-   ┌─────────┐      ┌────────┐
-   │ SUCCESS │      │ FAILED │──► retry? ──► PENDING (Phase 7)
-   └─────────┘      └────────┘
-                        │
-                    max_attempts
-                    exceeded?
-                        │
-                        ▼
-                   ┌────────┐
-                   │  DEAD  │   (Phase 7)
-                   └────────┘
+        ┌────────┼────────┐
+        │        │        │
+        ▼        ▼        ▼
+   ┌─────────┐  retry   ┌────────┐
+   │ SUCCESS │  pending  │  DEAD  │
+   └─────────┘           └────────┘
 ```
+
+Worker path on handler failure: `running` → `pending` (retry) or `dead` (exhausted). The `failed` enum value remains in Postgres for schema compatibility but is not used on the hot path.
 
 **Key invariants:**
 
-1. A job in `RUNNING` must eventually transition to `SUCCESS`, `FAILED`, or back to `PENDING` (via reaper — Phase 7)
-2. No job should ever move backwards from `SUCCESS` or `DEAD`
-3. `attempt_count` only ever increases
-4. Every transition is recorded in `job_events` (Phase 3+)
-5. Correctness under duplicate delivery comes from Postgres optimistic locking, not from the queue alone
-
----
-
-## Target Architecture — Phase 7+ (not built yet)
-
-The diagram below adds pieces planned for Phase 7 and beyond. **Do not assume these exist in the codebase until the checklist marks them done.**
-
-```
-                   ┌─────────────────────┐
-                   │   Client / curl     │
-                   └──────────┬──────────┘
-                              │ POST /jobs
-                              ▼
-                   ┌─────────────────────┐
-                   │    FastAPI (API)     │
-                   │   POST /jobs        │
-                   │   GET /jobs/{id}    │
-                   └────┬───────────┬────┘
-                        │           │
-               write job│           │push job_id
-               (PENDING)│           │XADD (priority stream)
-                        ▼           ▼
-               ┌──────────────┐  ┌──────────────┐
-               │   Postgres   │  │    Redis      │
-               │  jobs table  │  │  jobs:high    │
-               │  job_events  │  │  jobs:normal  │
-               │  tenants     │  │  jobs:low     │
-               └──────────────┘  │  + rate limit │
-                        ▲        │  + tenant cfg │
-                        │        └──────┬─────────┘
-                   read/│               │ XREADGROUP
-                  update│               ▼
-                        │   ┌───────────────────────┐
-                        └───┤     Worker pool        │
-                            │  + reaper coroutine    │
-                            │  + retries / DEAD      │
-                            │  + idempotency keys    │
-                            └────────────────────────┘
-```
+1. A job in `RUNNING` must eventually reach `SUCCESS`, `DEAD`, or return to `PENDING` (retry or reaper)
+2. No job moves backwards from `SUCCESS` or `DEAD`
+3. `attempt_count` only increases (on claim to `RUNNING`, and again on reaper reclaim)
+4. Every meaningful transition is recorded in `job_events`
+5. Duplicate delivery is safe via optimistic locking on status transitions
+6. `reaper_threshold_seconds` must be **greater than** `job_timeout_seconds`
 
 ---
 
@@ -162,21 +116,22 @@ The diagram below adds pieces planned for Phase 7 and beyond. **Do not assume th
 
 | Component | Introduced | Responsibility |
 |---|---|---|
-| `JobRunner` (in-memory) | Phase 1 | Submit, execute, track state (learning scaffold; not production path) |
+| `JobRunner` (in-memory) | Phase 1 | Learning scaffold; mirrors retry/DEAD semantics |
 | `asyncio` + `TaskGroup` | Phase 2 | Concurrent execution, timeouts |
 | Postgres `jobs` table | Phase 3 | Durable state store |
 | Postgres `job_events` | Phase 3 | Append-only audit trail |
 | Redis Streams | Phase 4 | Decouple submission from execution |
 | FastAPI | Phase 4 | HTTP submission and status API |
 | Worker process | Phase 4 | Standalone consumer process |
-| Multiple workers | Phase 5 | Horizontal scale; races surfaced and handled via optimistic lock |
+| Multiple workers | Phase 5 | Horizontal scale; optimistic lock |
 | Postgres `tenants` | Phase 6 | Per-tenant rate limit configuration |
 | `TenantConfigCache` | Phase 6 | Redis cache of tenant limits (60s TTL) |
-| Token bucket (Lua) | Phase 6 | Per-tenant execution rate limiting across all workers |
-| `wait_until_allowed` + jitter backoff | Phase 6 | Block worker until bucket grants a token |
-| Reaper coroutine | Phase 7 | Recover orphaned `RUNNING` jobs |
+| Token bucket (Lua) | Phase 6 | Per-tenant execution rate limiting |
 | Priority streams + weighted poll | Phase 7 | High/normal/low queue fairness |
 | Idempotency keys | Phase 7 | Dedupe `POST /jobs` per tenant |
+| Retry + backoff + `DEAD` | Phase 7 | Resilient failure handling |
+| Reaper coroutine | Phase 7 | Recover orphaned `RUNNING` jobs |
+| Handler registry | Phase 7 | Dispatch `job_type` to handlers |
 | `structlog` | Phase 8 | Structured JSON logging |
 | Prometheus + Grafana | Phase 8 | Metrics and dashboards |
 | OpenTelemetry + Jaeger | Phase 8 | Distributed tracing |
@@ -189,10 +144,11 @@ The diagram below adds pieces planned for Phase 7 and beyond. **Do not assume th
 1. **Job payload lives in Postgres** — only `job_id` travels through Redis Streams
 2. **At-least-once delivery** is the baseline; optimistic locking makes duplicate delivery safe
 3. **Every status transition is a single DB transaction** — `UPDATE jobs` + `INSERT job_events`
-4. **Workers are stateless** — any worker can execute any job; shared rate-limit state lives in Redis
-5. **The reaper uses the same optimistic lock** as workers — no special-casing (Phase 7)
+4. **Workers are stateless** — shared rate-limit state lives in Redis
+5. **The reaper uses the same optimistic lock pattern** as workers (`WHERE status = 'running'`)
 6. **Rate limiting is enforced at execution time** (worker), not submission time (API)
 7. **Tenant limits are authoritative in Postgres** — Redis `tenant_config` is a short-lived cache only
+8. **Handlers should be idempotent** — reaper and at-least-once delivery can cause duplicate execution
 
 ---
 
@@ -202,4 +158,5 @@ The diagram below adds pieces planned for Phase 7 and beyond. **Do not assume th
 - No ORM — raw `asyncpg` SQL so every query is explicit
 - No Kubernetes — Docker Compose only
 - No multi-region — single-region throughout
-- No priority queues, reaper, or idempotency until Phase 7 (see checklist)
+- No transactional outbox yet — rare Postgres-without-Redis enqueue gap remains
+- No observability stack until Phase 8 (see checklist)

@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -17,6 +18,11 @@ class JobResponse(BaseModel):
     id: str
     status: str
     priority: str | None = None
+    tenant_id: str | None = None
+    attempt_count: int | None = None
+    max_attempts: int | None = None
+    scheduled_at: datetime | None = None
+    error_message: str | None = None
     created: bool | None = None
 
 

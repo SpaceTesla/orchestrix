@@ -48,12 +48,12 @@
 
 ## PHASE 7 — Multi-Tenancy and Failures
 
-- [ ] Idempotency key deduplication working
-- [ ] Three priority queues with weighted polling
-- [ ] Retry with exponential backoff + jitter
-- [ ] DEAD status after max_attempts
-- [ ] Reaper recovers orphaned RUNNING jobs
-- [ ] Reaper uses optimistic lock
+- [x] Idempotency key deduplication working
+- [x] Three priority queues with weighted polling
+- [x] Retry with exponential backoff + jitter
+- [x] DEAD status after max_attempts
+- [x] Reaper recovers orphaned RUNNING jobs
+- [x] Reaper uses optimistic lock
 
 ## PHASE 8 — Observability
 

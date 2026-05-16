@@ -10,7 +10,7 @@ from orchestrix.db import queries
 from orchestrix.db.pool import get_pool, init_pool
 from orchestrix.queue.priority import ALL_JOB_STREAMS
 from orchestrix.queue.redis_client import RedisQueue
-from orchestrix.handlers.sample_handlers import failing_job, long_running_job
+from orchestrix.handlers import execute, register_handlers
 from orchestrix.worker.reaper import reaper_loop
 from orchestrix.rate_limit.gate import wait_until_allowed
 from orchestrix.rate_limit.redis_rate_limiter import RedisRateLimiter
@@ -86,18 +86,8 @@ async def _process_message(
                 f"(priority={job['priority']}, attempt={job['attempt_count'] + 1})"
             )
 
-            timeout = settings.job_timeout_seconds
-
-            async def _execute() -> None:
-                if job["job_type"] == "failing_job":
-                    await failing_job(job["payload"])
-                elif job["job_type"] == "long_running_job":
-                    await long_running_job(job["payload"])
-                else:
-                    await asyncio.sleep(10)
-
-            async with asyncio.timeout(timeout):
-                await _execute()
+            async with asyncio.timeout(settings.job_timeout_seconds):
+                await execute(str(job["job_type"]), job["payload"])
 
             await queries.transition_status(
                 conn,
@@ -184,6 +174,7 @@ async def _drain_autoclaim(
 
 
 async def worker() -> None:
+    register_handlers()
     await init_pool()
 
     queue = RedisQueue(settings.redis_url)

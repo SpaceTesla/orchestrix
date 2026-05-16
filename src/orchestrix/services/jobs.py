@@ -11,9 +11,12 @@ from orchestrix.services.exceptions import JobNotFoundError
 
 @dataclass(frozen=True)
 class CreateJobResult:
-    job_id: str
-    status: str
+    job: Record
     was_created: bool
+
+    @property
+    def job_id(self) -> str:
+        return str(self.job["id"])
 
 
 async def create_job(
@@ -30,11 +33,10 @@ async def create_job(
         conn, tenant_id, idempotency_key
     )
     if existing:
-        return CreateJobResult(
-            job_id=str(existing["id"]),
-            status=str(existing["status"]),
-            was_created=False,
-        )
+        job = await queries.get_job(conn, str(existing["id"]))
+        if job is None:
+            raise RuntimeError(f"idempotency key references missing job {existing['id']}")
+        return CreateJobResult(job=job, was_created=False)
 
     try:
         job = await queries.create_job(
@@ -51,18 +53,16 @@ async def create_job(
         )
         if existing is None:
             raise
-        return CreateJobResult(
-            job_id=str(existing["id"]),
-            status=str(existing["status"]),
-            was_created=False,
-        )
+        job = await queries.get_job(conn, str(existing["id"]))
+        if job is None:
+            raise RuntimeError(f"idempotency key references missing job {existing['id']}")
+        return CreateJobResult(job=job, was_created=False)
 
     await queue.enqueue(str(job["id"]), priority)
-    return CreateJobResult(
-        job_id=str(job["id"]),
-        status=str(job["status"]),
-        was_created=True,
-    )
+    full_job = await queries.get_job(conn, str(job["id"]))
+    if full_job is None:
+        raise RuntimeError(f"job {job['id']} missing immediately after insert")
+    return CreateJobResult(job=full_job, was_created=True)
 
 
 async def get_job(conn: Connection, job_id: str) -> Record:

@@ -4,24 +4,22 @@ from orchestrix.api.schemas import ErrorResponse, JobResponse
 
 _JOB_JSON = "application/json"
 
-JOB_CREATED_EXAMPLE = {
+_JOB_DETAIL = {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "status": "pending",
     "priority": "normal",
-    "created": True,
+    "tenant_id": "660e8400-e29b-41d4-a716-446655440001",
+    "attempt_count": 0,
+    "max_attempts": 3,
+    "scheduled_at": "2026-05-16T12:00:00+00:00",
+    "error_message": None,
 }
 
-JOB_REPLAYED_EXAMPLE = {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "status": "pending",
-    "created": False,
-}
+JOB_CREATED_EXAMPLE = {**_JOB_DETAIL, "created": True}
 
-JOB_GET_EXAMPLE = {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "status": "pending",
-    "priority": "normal",
-}
+JOB_REPLAYED_EXAMPLE = {**_JOB_DETAIL, "created": False}
+
+JOB_GET_EXAMPLE = {k: v for k, v in _JOB_DETAIL.items() if k != "created"}
 
 VALIDATION_ERROR_EXAMPLE = {
     "detail": [
