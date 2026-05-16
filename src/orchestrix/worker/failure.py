@@ -4,6 +4,7 @@ from asyncpg import Record
 
 from orchestrix.config import settings
 from orchestrix.core.logging import get_logger
+from orchestrix.core.metrics import observe_job_attempts, record_job_completed
 from orchestrix.db import queries
 from orchestrix.queue.redis_client import RedisQueue
 from orchestrix.retry.backoff import compute_retry_delay_seconds, should_retry
@@ -55,6 +56,12 @@ async def handle_job_failure(
             scheduled_at=scheduled_at.isoformat(),
             max_attempts=max_attempts,
         )
+        record_job_completed(
+            tenant_id=str(job["tenant_id"]),
+            job_type=str(job["job_type"]),
+            status="failed",
+        )
+        observe_job_attempts(attempt_count)
         return "retry_scheduled"
 
     marked = await queries.mark_job_dead(
@@ -71,4 +78,10 @@ async def handle_job_failure(
         error_message=error_message,
         max_attempts=max_attempts,
     )
+    record_job_completed(
+        tenant_id=str(job["tenant_id"]),
+        job_type=str(job["job_type"]),
+        status="dead",
+    )
+    observe_job_attempts(attempt_count)
     return "job_dead"

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import socket
+import time
 
 from redis.asyncio import Redis
 
@@ -12,6 +13,14 @@ from orchestrix.core.logging import (
     configure_logging,
     get_logger,
 )
+from orchestrix.core.metrics import (
+    observe_job_attempts,
+    observe_job_duration,
+    record_job_completed,
+    refresh_queue_depth,
+    worker_active_jobs_dec,
+    worker_active_jobs_inc,
+)
 from orchestrix.db import queries
 from orchestrix.db.pool import get_pool, init_pool
 from orchestrix.handlers import execute, register_handlers
@@ -20,6 +29,7 @@ from orchestrix.queue.redis_client import RedisQueue
 from orchestrix.rate_limit.gate import wait_until_allowed
 from orchestrix.rate_limit.redis_rate_limiter import RedisRateLimiter
 from orchestrix.worker.failure import handle_job_failure
+from orchestrix.worker.metrics_server import start_worker_metrics_server
 from orchestrix.worker.reaper import reaper_loop
 from orchestrix.worker.scheduling import wait_until_eligible
 
@@ -113,16 +123,27 @@ async def _process_message(
 
             _bind_job_from_record(job, worker_id=worker_id)
 
+            job_type = str(job["job_type"])
+            tenant_id = str(job["tenant_id"])
+            attempt_count = int(job["attempt_count"])
+
             worker_log.info(
                 "job_executing",
-                job_type=str(job["job_type"]),
+                job_type=job_type,
                 priority=job["priority"],
-                execution_attempt=int(job["attempt_count"]),
+                execution_attempt=attempt_count,
             )
 
+            handler_started = False
+            handler_start: float | None = None
+
             try:
+                worker_active_jobs_inc(worker_id=worker_id)
+                handler_started = True
+                handler_start = time.perf_counter()
+
                 async with asyncio.timeout(settings.job_timeout_seconds):
-                    await execute(str(job["job_type"]), job["payload"])
+                    await execute(job_type, job["payload"])
 
                 await queries.transition_status(
                     conn,
@@ -134,6 +155,12 @@ async def _process_message(
 
                 await queue.ack(stream, message_id)
                 worker_log.info("job_completed")
+                record_job_completed(
+                    tenant_id=tenant_id,
+                    job_type=job_type,
+                    status="success",
+                )
+                observe_job_attempts(attempt_count)
             except TimeoutError:
                 worker_log.error(
                     "job_timeout",
@@ -174,6 +201,13 @@ async def _process_message(
                 )
 
                 await queue.ack(stream, message_id)
+            finally:
+                if handler_started and handler_start is not None:
+                    observe_job_duration(
+                        job_type=job_type,
+                        duration_seconds=time.perf_counter() - handler_start,
+                    )
+                    worker_active_jobs_dec(worker_id=worker_id)
     finally:
         clear_job_context()
 
@@ -232,6 +266,8 @@ async def worker() -> None:
     worker_id = get_worker_id()
     worker_log = log.bind(worker_id=worker_id, component="worker")
 
+    start_worker_metrics_server(port=settings.metrics_worker_port)
+
     reaper_id = f"{worker_id}-reaper"
     shutdown = asyncio.Event()
 
@@ -254,6 +290,8 @@ async def worker() -> None:
 
     try:
         while True:
+            await refresh_queue_depth(queue)
+
             stream = queue.next_poll_stream()
             messages = await queue.read(stream, worker_id, count=5)
 

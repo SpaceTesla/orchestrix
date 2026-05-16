@@ -1,4 +1,5 @@
 from orchestrix.core.logging import get_logger
+from orchestrix.core.metrics import record_rate_limit_rejection
 from orchestrix.rate_limit.backoff import sleep_retry_after_with_jitter
 from orchestrix.rate_limit.redis_rate_limiter import RateLimitResult, RedisRateLimiter
 
@@ -48,4 +49,5 @@ async def wait_until_allowed(
             retry_after=retry_after,
             denial_count=denial_count,
         )
+        record_rate_limit_rejection(tenant_id=tenant_id)
         await sleep_retry_after_with_jitter(retry_after)

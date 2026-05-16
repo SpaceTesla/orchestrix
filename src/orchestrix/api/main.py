@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from prometheus_client import make_asgi_app
 
 from orchestrix.api.middleware import RequestLoggingMiddleware
 from orchestrix.api.routes import router
@@ -39,6 +40,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(RequestLoggingMiddleware)
     app.include_router(router)
+    app.mount("/metrics", make_asgi_app())
 
     return app
 

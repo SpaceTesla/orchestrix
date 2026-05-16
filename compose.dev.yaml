@@ -34,6 +34,10 @@ services:
 
     command: orchestrix worker
 
+    # Metrics on :9090 inside the container (no host port — avoids conflicts with --scale worker=N)
+    expose:
+      - "9090"
+
     depends_on:
       postgres:
         condition: service_healthy

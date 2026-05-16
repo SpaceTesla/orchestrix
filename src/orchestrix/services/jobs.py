@@ -4,6 +4,7 @@ from asyncpg import Connection, Record
 from asyncpg.exceptions import UniqueViolationError
 
 from orchestrix.core.logging import get_logger
+from orchestrix.core.metrics import record_job_submitted
 from orchestrix.db import queries
 from orchestrix.queue.priority import JobPriority
 from orchestrix.queue.redis_client import RedisQueue
@@ -86,6 +87,7 @@ async def create_job(
         job_type=job_type,
         priority=priority.value,
     )
+    record_job_submitted(tenant_id=tenant_id, priority=priority.value)
     return CreateJobResult(job=full_job, was_created=True)
 
 

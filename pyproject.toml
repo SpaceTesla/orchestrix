@@ -9,6 +9,7 @@ dependencies = [
     "asyncpg>=0.31.0",
     "fastapi>=0.136.1",
     "httpx>=0.28.1",
+    "prometheus-client>=0.25.0",
     "pydantic-settings>=2.14.0",
     "redis[hiredis]>=7.4.0",
     "rich>=15.0.0",

@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: Literal["json", "console"] = "console"
 
+    metrics_worker_port: int = 9090
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="",
