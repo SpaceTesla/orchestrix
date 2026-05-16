@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Header
 from fastapi.responses import JSONResponse
-from typing import List
+from typing import List, Annotated
+from uuid import UUID
 from fastapi import Query
+from asyncpg.exceptions import UniqueViolationError
+
 import asyncpg
 
 from orchestrix.api.deps import get_redis_queue, get_db_conn
@@ -69,30 +72,60 @@ async def get_health():
     return body
 
 
-@router.post("/jobs", response_model=JobResponse)
+@router.post(
+    "/jobs",
+    response_model=JobResponse,
+    status_code=201,
+    responses={
+        200: {
+            "model": JobResponse,
+            "description": "Existing job returned for duplicate idempotency key",
+        },
+        201: {
+            "model": JobResponse,
+            "description": "New job created",
+        },
+    },
+)
 async def create_jobs(
     request: JobCreateRequest,
+    idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
     queue: RedisQueue = Depends(get_redis_queue),
     conn: asyncpg.Connection = Depends(get_db_conn),
 ):
-    # Step 1 - insert into db
-    job = await queries.create_job(
-        conn,
-        tenant_id=str(request.tenant_id),
-        job_type=request.job_type,
-        payload=request.payload,
-    )
+    tenant_id = str(request.tenant_id)
+    key = str(idempotency_key)
 
-    # Step 2 - enqueue (insert to redis stream)
+    existing = await queries.get_job_by_idempotency_key(conn, tenant_id, key)
+    if existing:
+        return _post_job_response(existing, created=False, status_code=200)
+
+    try:
+        job = await queries.create_job(
+            conn,
+            tenant_id=tenant_id,
+            job_type=request.job_type,
+            payload=request.payload,
+            idempotency_key=key,
+        )
+
+    # Race condition -
+    # Did another request create it in the milliseconds between my check and my insert?
+    except UniqueViolationError:
+        existing = await queries.get_job_by_idempotency_key(conn, tenant_id, key)
+        if existing is None:
+            raise
+        return _post_job_response(existing, created=False, status_code=200)
+
     await queue.enqueue(str(job["id"]))
-
-    return JobResponse(
-        id=str(job["id"]),
-        status=job.get("status"),
-    )
+    return _post_job_response(job, created=True, status_code=201)
 
 
-@router.get("/jobs/{job_id}", response_model=JobResponse)
+@router.get(
+    "/jobs/{job_id}",
+    response_model=JobResponse,
+    response_model_exclude_none=True,
+)
 async def get_job(
     job_id: str,
     conn: asyncpg.Connection = Depends(get_db_conn),
@@ -108,7 +141,11 @@ async def get_job(
     )
 
 
-@router.get("/jobs", response_model=List[JobResponse])
+@router.get(
+    "/jobs",
+    response_model=List[JobResponse],
+    response_model_exclude_none=True,
+)
 async def list_jobs(
     limit: int = Query(20, le=100),
     status: str | None = Query(None),
@@ -123,3 +160,17 @@ async def list_jobs(
         )
         for row in rows
     ]
+
+
+def _post_job_response(
+    record: asyncpg.Record,
+    *,
+    created: bool,
+    status_code: int,
+) -> JSONResponse:
+    body = JobResponse(
+        id=str(record["id"]),
+        status=str(record["status"]),
+        created=created,
+    )
+    return JSONResponse(status_code=status_code, content=body.model_dump())

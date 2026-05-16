@@ -6,7 +6,7 @@
 import asyncio
 import os
 import random
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 
@@ -46,6 +46,7 @@ async def main() -> None:
                 job_type = random.choice(JOB_TYPES)
                 response = await client.post(
                     "/jobs",
+                    headers={"Idempotency-Key": str(uuid4())},
                     json={
                         "tenant_id": str(tenant_uuid),
                         "job_type": job_type,

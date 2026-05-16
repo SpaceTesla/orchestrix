@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from pydantic import BaseModel, Field
-from typing import Dict, Any, Literal
+from typing import Any, Dict, Literal
 
 
 class JobCreateRequest(BaseModel):
@@ -13,6 +13,7 @@ class JobCreateRequest(BaseModel):
 class JobResponse(BaseModel):
     id: str
     status: str
+    created: bool | None = None
 
 
 class DependencyCheck(BaseModel):

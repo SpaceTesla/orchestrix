@@ -75,16 +75,18 @@ async def create_job(
     tenant_id: str,
     job_type: str,
     payload: dict,
+    idempotency_key: str,
 ) -> Record:
     return await conn.fetchrow(
         """
-        INSERT INTO jobs (tenant_id, job_type, payload)
-        VALUES ($1, $2, $3::jsonb)
+        INSERT INTO jobs (tenant_id, job_type, payload, idempotency_key)
+        VALUES ($1, $2, $3::jsonb, $4::uuid)
         RETURNING id, status
         """,
         tenant_id,
         job_type,
         json.dumps(payload),
+        idempotency_key,
     )
 
 
@@ -99,6 +101,23 @@ async def get_job(
         WHERE id = $1
         """,
         job_id,
+    )
+
+
+async def get_job_by_idempotency_key(
+    conn: Connection,
+    tenant_id: str,
+    idempotency_key: str,
+) -> Optional[Record]:
+    return await conn.fetchrow(
+        """
+        SELECT id, status
+        FROM jobs
+        WHERE tenant_id = $1::uuid
+          AND idempotency_key = $2::uuid
+        """,
+        tenant_id,
+        idempotency_key,
     )
 
 
