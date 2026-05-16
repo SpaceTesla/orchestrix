@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from typing import List, Callable, Dict, Any, Optional, Awaitable, Annotated
 from annotated_types import Ge
+from uuid import UUID
 
 import asyncio
 from rich.console import Console
@@ -33,10 +34,11 @@ class JobRunner:
     def submit(
         self,
         job_type: str,
+        tenant_id: UUID,
         payload: Dict[str, Any],
         timeout: Optional[Timeout] = None,
     ) -> Job:
-        job = Job(type=job_type, payload=payload, timeout=timeout)
+        job = Job(type=job_type, tenant_id=tenant_id, payload=payload, timeout=timeout)
         self.jobs.append(job)
         return job
 
@@ -56,7 +58,7 @@ class JobRunner:
             job.completed_at = datetime.now(timezone.utc)
 
             self._log(
-                f"[{job.type}] NO HANDLER | id={job.id}",
+                f"[{job.type}] NO HANDLER | id={job.id} tenant_id={job.tenant_id}",
                 style="bold red",
             )
             return job
@@ -66,7 +68,8 @@ class JobRunner:
 
         self.active_jobs += 1
         self._log(
-            f"[{job.type}] START | id={job.id} | attempt={job.attempt_count} | active={self.active_jobs}",
+            f"[{job.type}] START | id={job.id} tenant_id={job.tenant_id} "
+            f"| attempt={job.attempt_count} | active={self.active_jobs}",
             style="cyan",
         )
 
@@ -81,7 +84,7 @@ class JobRunner:
 
             job.status = JobStatus.SUCCESS
             self._log(
-                f"[{job.type}] SUCCESS | id={job.id}",
+                f"[{job.type}] SUCCESS | id={job.id} tenant_id={job.tenant_id}",
                 style="green",
             )
 
@@ -89,7 +92,8 @@ class JobRunner:
             job.status = JobStatus.FAILED
             job.error_message = f"timeout after {timeout}s"
             self._log(
-                f"[{job.type}] TIMEOUT | id={job.id} | timeout={timeout}s",
+                f"[{job.type}] TIMEOUT | id={job.id} tenant_id={job.tenant_id} "
+                f"| timeout={timeout}s",
                 style="yellow",
             )
 
@@ -97,7 +101,7 @@ class JobRunner:
             job.status = JobStatus.FAILED
             job.error_message = str(e)
             self._log(
-                f"[{job.type}] FAILED | id={job.id} | error={e}",
+                f"[{job.type}] FAILED | id={job.id} tenant_id={job.tenant_id} | error={e}",
                 style="red",
             )
 
@@ -105,7 +109,8 @@ class JobRunner:
             job.completed_at = datetime.now(timezone.utc)
             self.active_jobs = max(0, self.active_jobs - 1)
             self._log(
-                f"[{job.type}] DONE | id={job.id} | active={self.active_jobs}",
+                f"[{job.type}] DONE | id={job.id} tenant_id={job.tenant_id} "
+                f"| active={self.active_jobs}",
                 style="dim",
             )
 

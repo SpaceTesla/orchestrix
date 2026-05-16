@@ -20,6 +20,7 @@ Timeout = Annotated[int, Ge(0)]
 @dataclass
 class Job:
     type: str
+    tenant_id: uuid.UUID
     payload: Dict[str, Any] = field(default_factory=dict)
 
     id: uuid.UUID = field(default_factory=uuid.uuid4)
@@ -36,4 +37,7 @@ class Job:
     max_attempts: int = 3
 
     def __repr__(self) -> str:
-        return f"<Job id={self.id} type={self.type} status={self.status.value}>"
+        return (
+            f"<Job id={self.id} tenant_id={self.tenant_id} "
+            f"type={self.type} status={self.status.value}>"
+        )
