@@ -236,8 +236,6 @@ Using `TIMESTAMPTZ` normalizes time handling and prevents subtle ordering bugs.
 
 # Phase 4 — Redis Queue
 
-_(Populate when you reach Phase 4)_
-
 ## Pre-phase question
 
 What happens between the moment `POST /jobs` returns and the moment a worker starts executing the job? Who holds the job during that window?
@@ -309,8 +307,6 @@ not from the queue itself.
 ---
 
 # Phase 5 — Multiple Workers
-
-_(Populate when you reach Phase 5)_
 
 ## Pre-phase question
 
@@ -407,8 +403,6 @@ This helped me understand why reapers/orphan recovery mechanisms exist.
 ---
 
 # Phase 6 — Rate Limiting
-
-_(Populate when you reach Phase 6)_
 
 ## Pre-phase question
 

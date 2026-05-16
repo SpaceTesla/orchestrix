@@ -21,6 +21,16 @@ Phase 9  →  Load test and harden
 Phase 10 →  Stretch goals (WFQ, circuit breakers, control plane)
 ```
 
+### Implementation status
+
+| Phases | Status |
+|--------|--------|
+| 1–6 | **Done** — see [`checklist.md`](checklist.md) |
+| 7–9 | Not started |
+| 10 | Optional stretch |
+
+**As-built architecture (Phases 1–6):** [`architecture.md`](architecture.md). **Learning notes:** [`dev-notes.md`](dev-notes.md).
+
 ---
 
 ## Phase 1 — The Synchronous Foundation

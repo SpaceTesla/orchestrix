@@ -29,10 +29,12 @@ See [`docs/roadmap.md`](docs/roadmap.md) for the full phase-by-phase specificati
 
 ## Current Phase
 
-**Phase 4 — Redis Queue (decouple submission from execution)**
+**Phase 6 — Rate limiting (per-tenant token bucket)**
 
-FastAPI accepts job submissions, persists jobs to Postgres, and enqueues `job_id` into a Redis Stream.
-A separate worker process consumes the stream and updates job status in Postgres.
+FastAPI accepts job submissions (with `tenant_id`), persists jobs to Postgres, and enqueues `job_id` into a Redis Stream.
+One or more worker processes consume the stream, enforce per-tenant limits via a Redis Lua token bucket, then claim and execute jobs in Postgres.
+
+Progress: see [`docs/checklist.md`](docs/checklist.md). Architecture: [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
@@ -54,17 +56,22 @@ docker run --name orchestrix-redis -p 6379:6379 -d redis:7
 # Bootstrap DB schema (Phase 3+)
 uv run python scripts/bootstrap_db.py
 
-# Run API (Phase 4)
+# Run API
 uv run orchestrix api --reload
 
-# In another terminal: run worker (Phase 4)
+# In another terminal: run worker(s)
 uv run orchestrix worker
+
+# Or via Docker Compose (Postgres + Redis + API + 3 workers)
+docker compose -f compose.yaml -f compose.dev.yaml up --build --scale worker=3
 ```
 
-Example request:
+Example request (requires a tenant in Postgres — run `scripts/bootstrap_db.py` and seed via `scripts/seed_jobs.py`, or use your tenant UUID):
 
 ```bash
-curl -X POST http://127.0.0.1:8000/jobs -H "Content-Type: application/json" -d "{\"job_type\":\"test\",\"payload\":{\"hello\":\"world\"}}"
+curl -X POST http://127.0.0.1:8000/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id":"<uuid>","job_type":"test","payload":{"hello":"world"}}'
 ```
 
 ---
@@ -76,11 +83,14 @@ orchestrix/
   src/orchestrix/
     api/               # FastAPI app (Phase 4+)
     worker/            # Worker process (Phase 4+)
-    db/                # asyncpg pool + queries (Phase 3+)
+    db/                # asyncpg pool + queries + migrations (Phase 3+)
     queue/             # Redis Streams client (Phase 4+)
+    cache/             # Tenant config Redis cache (Phase 6)
+    rate_limit/        # Token bucket Lua + gate + backoff (Phase 6)
+    runner/            # In-memory JobRunner (Phase 1–2 learning scaffold)
     main.py            # CLI entrypoint (api/worker)
-  scripts/             # DB bootstrap and helpers
-  docs/                # Roadmap + notes
+  scripts/             # DB bootstrap, seed_jobs, rate-limit tests
+  docs/                # Roadmap, architecture, checklist, dev-notes
   pyproject.toml       # Dependencies + console script
 ```
 
@@ -104,10 +114,13 @@ Key choices at the Phase 6+ level:
 
 ## Known Limitations
 
-- Phase 4: if Postgres write succeeds but Redis `XADD` fails, the job will remain `pending` in Postgres but never be executed (fixed in Phase 7)
-- Phase 3–5: single-region only, no HA Postgres
+- If Postgres write succeeds but Redis `XADD` fails, the job stays `pending` in Postgres with no stream message (addressed in Phase 7)
+- No idempotency keys, priority queues, automatic retries, or reaper yet (Phase 7)
+- Single stream `jobs:queue` only (not `jobs:high` / `normal` / `low`)
+- Single-region only, no HA Postgres
+- No structured metrics/tracing yet (Phase 8)
 - No authentication until Phase 10 stretch goal
-- No Kubernetes / cloud deployment — local Docker Compose only
+- Local Docker Compose only — no Kubernetes / cloud deployment
 
 ---
 
@@ -125,4 +138,4 @@ Key choices at the Phase 6+ level:
 
 ## Why the Lua Script Must Be Atomic
 
-*(Populated in Phase 6)*
+Multiple workers can call the rate limiter for the same tenant at the same time. Redis runs each Lua script atomically: read bucket state, refill by elapsed time, debit a token (or deny), write state, and return — with no interleaving from other commands. A non-atomic read-modify-write in Python would let two workers both think a token is available. See `src/orchestrix/rate_limit/lua/token_bucket.lua` and [`docs/architecture.md`](docs/architecture.md#redis-data-model-phase-6).
