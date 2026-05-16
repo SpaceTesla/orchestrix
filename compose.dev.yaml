@@ -21,6 +21,7 @@ services:
 
     volumes:
       - ./src:/app/src
+      - ./tests:/app/tests
 
     networks:
       - app-network

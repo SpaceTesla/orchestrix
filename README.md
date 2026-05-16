@@ -64,6 +64,13 @@ uv run orchestrix worker
 
 # Or via Docker Compose (Postgres + Redis + API + 3 workers)
 docker compose -f compose.yaml -f compose.dev.yaml up --build --scale worker=3
+
+# Unit tests (Phase 7 pure logic; no Postgres/Redis required)
+uv sync --group dev
+uv run pytest
+
+# Same tests inside the API container (requires compose.dev.yaml tests mount)
+docker compose -f compose.yaml -f compose.dev.yaml exec api sh -c "uv sync --group dev && uv run pytest"
 ```
 
 Example request (requires a tenant in Postgres — run `scripts/bootstrap_db.py` and seed via `scripts/seed_jobs.py`, or use your tenant UUID):
