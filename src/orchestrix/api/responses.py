@@ -13,6 +13,6 @@ def api_response(
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
-        content=body.model_dump(exclude_none=exclude_none),
+        content=body.model_dump(mode="json", exclude_none=exclude_none),
         headers=headers,
     )
