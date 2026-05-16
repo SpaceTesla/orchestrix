@@ -16,6 +16,10 @@ class JobResponse(BaseModel):
     created: bool | None = None
 
 
+class ErrorResponse(BaseModel):
+    detail: str
+
+
 class DependencyCheck(BaseModel):
     ok: bool
     error: str | None = None

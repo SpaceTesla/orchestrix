@@ -1,37 +1,34 @@
-from fastapi import APIRouter, Depends, Request, Header
-from fastapi.responses import JSONResponse
-from typing import List, Annotated
+from typing import Annotated, List
 from uuid import UUID
-from fastapi import Query
-from asyncpg.exceptions import UniqueViolationError
 
 import asyncpg
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 
-from orchestrix.api.deps import get_redis_queue, get_db_conn
-from orchestrix.queue.redis_client import RedisQueue, get_redis_queue_instance
+from orchestrix.api.deps import get_db_conn, get_redis_queue
+from orchestrix.api.mappers import job_to_response
+from orchestrix.api.openapi import JOB_GET_RESPONSES, JOB_POST_RESPONSES
+from orchestrix.api.responses import api_response
 from orchestrix.api.schemas import (
+    HealthResponse,
     JobCreateRequest,
     JobResponse,
-    HealthResponse,
-    DependencyCheck,
     RootResponse,
 )
-from orchestrix.db import queries
-from orchestrix.db.pool import get_pool
-
+from orchestrix.queue.redis_client import RedisQueue
+from orchestrix.services import health as health_service
+from orchestrix.services import jobs as job_service
+from orchestrix.services.exceptions import JobNotFoundError
+from orchestrix.services.root import build_root_response
 
 router = APIRouter()
 
 
 @router.get("/", response_model=RootResponse)
 async def root(request: Request) -> RootResponse:
-    base = str(request.base_url).rstrip("/")
-    return RootResponse(
+    return build_root_response(
         service=request.app.title,
         version=request.app.version,
-        docs=f"{base}/docs",
-        openapi=f"{base}/openapi.json",
-        health=f"{base}/health",
+        base_url=str(request.base_url),
     )
 
 
@@ -46,99 +43,56 @@ async def root(request: Request) -> RootResponse:
     },
 )
 async def get_health():
-    postgres_check = DependencyCheck(ok=True)
-    try:
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-    except Exception as e:
-        postgres_check = DependencyCheck(ok=False, error=str(e))
-
-    redis_check = DependencyCheck(ok=True)
-    try:
-        queue = get_redis_queue_instance()
-        await queue.redis.ping()
-    except Exception as e:
-        redis_check = DependencyCheck(ok=False, error=str(e))
-
-    healthy = postgres_check.ok and redis_check.ok
-    body = HealthResponse(
-        status="healthy" if healthy else "unhealthy",
-        postgres=postgres_check,
-        redis=redis_check,
-    )
-    if not healthy:
-        return JSONResponse(status_code=503, content=body.model_dump())
-    return body
+    result = await health_service.check_health()
+    if not result.healthy:
+        return api_response(result.body, status_code=503)
+    return result.body
 
 
 @router.post(
     "/jobs",
     response_model=JobResponse,
     status_code=201,
-    responses={
-        200: {
-            "model": JobResponse,
-            "description": "Existing job returned for duplicate idempotency key",
-        },
-        201: {
-            "model": JobResponse,
-            "description": "New job created",
-        },
-    },
+    responses=JOB_POST_RESPONSES,
 )
-async def create_jobs(
+async def create_job(
     request: JobCreateRequest,
     idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
     queue: RedisQueue = Depends(get_redis_queue),
     conn: asyncpg.Connection = Depends(get_db_conn),
 ):
-    tenant_id = str(request.tenant_id)
-    key = str(idempotency_key)
-
-    existing = await queries.get_job_by_idempotency_key(conn, tenant_id, key)
-    if existing:
-        return _post_job_response(existing, created=False, status_code=200)
-
-    try:
-        job = await queries.create_job(
-            conn,
-            tenant_id=tenant_id,
-            job_type=request.job_type,
-            payload=request.payload,
-            idempotency_key=key,
-        )
-
-    # Race condition -
-    # Did another request create it in the milliseconds between my check and my insert?
-    except UniqueViolationError:
-        existing = await queries.get_job_by_idempotency_key(conn, tenant_id, key)
-        if existing is None:
-            raise
-        return _post_job_response(existing, created=False, status_code=200)
-
-    await queue.enqueue(str(job["id"]))
-    return _post_job_response(job, created=True, status_code=201)
+    result = await job_service.create_job(
+        conn,
+        queue,
+        tenant_id=str(request.tenant_id),
+        job_type=request.job_type,
+        payload=request.payload,
+        idempotency_key=str(idempotency_key),
+    )
+    body = job_to_response(
+        {"id": result.job_id, "status": result.status},
+        created=result.was_created,
+    )
+    status_code = 201 if result.was_created else 200
+    headers = {"Location": f"/jobs/{result.job_id}"} if result.was_created else None
+    return api_response(body, status_code=status_code, headers=headers)
 
 
 @router.get(
     "/jobs/{job_id}",
     response_model=JobResponse,
     response_model_exclude_none=True,
+    responses=JOB_GET_RESPONSES,
 )
 async def get_job(
-    job_id: str,
+    job_id: Annotated[UUID, Path(description="Job UUID")],
     conn: asyncpg.Connection = Depends(get_db_conn),
 ):
-    job = await queries.get_job(conn, job_id)
-
-    if not job:
-        return {"id": job_id, "status": "not_found"}
-
-    return JobResponse(
-        id=str(job["id"]),
-        status=job["status"],
-    )
+    try:
+        record = await job_service.get_job(conn, str(job_id))
+    except JobNotFoundError:
+        raise HTTPException(status_code=404, detail="Job not found") from None
+    return job_to_response(record)
 
 
 @router.get(
@@ -151,26 +105,5 @@ async def list_jobs(
     status: str | None = Query(None),
     conn: asyncpg.Connection = Depends(get_db_conn),
 ):
-    rows = await queries.list_jobs(conn, limit=limit, status=status)
-
-    return [
-        JobResponse(
-            id=str(row["id"]),
-            status=row["status"],
-        )
-        for row in rows
-    ]
-
-
-def _post_job_response(
-    record: asyncpg.Record,
-    *,
-    created: bool,
-    status_code: int,
-) -> JSONResponse:
-    body = JobResponse(
-        id=str(record["id"]),
-        status=str(record["status"]),
-        created=created,
-    )
-    return JSONResponse(status_code=status_code, content=body.model_dump())
+    rows = await job_service.list_jobs(conn, limit=limit, status=status)
+    return [job_to_response(row) for row in rows]
